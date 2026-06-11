@@ -1,0 +1,23 @@
+{
+  "name": "stagehand-hui-explorer",
+  "version": "2.0.0",
+  "description": "Stagehand + Playwright CDP 探勘引擎 — HUI 组件专用",
+  "private": true,
+  "scripts": {
+    "explore": "ts-node src/explore.ts",
+    "explore:fast": "ts-node src/explore.ts --mode=fast",
+    "explore:deep": "ts-node src/explore.ts --mode=deep",
+    "build": "tsc",
+    "test": "ts-node src/__test__.ts"
+  },
+  "dependencies": {
+    "@browserbasehq/stagehand": "^3.3.0",
+    "playwright": "^1.52.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,8 @@
+[
+  {"action": "select", "label": "客户标识类型", "value": "0:入账账号"},
+  {"action": "fill", "label": "客户标识", "value": "A3060210020001"},
+  {"action": "select", "label": "产品代码", "value": "11:AI自动化测试产品"},
+  {"action": "select", "label": "业务代码", "value": "122:申购"},
+  {"action": "fill", "label": "申请编号", "value": "AP20260101001"},
+  {"action": "click", "label": "查询"}
+]

@@ -1,0 +1,20 @@
+runtime:
+  skill_root: ./knowledge
+  runs_root: ./runs
+  checkpoint_db: ./runs/checkpoints.sqlite
+  serial_browser: true
+
+models:
+  default: gpt-4.1
+  sql_reasoning: gpt-4.1
+  test_repair: gpt-4.1
+
+limits:
+  max_step_retries: 3
+  max_sql_repair_retries: 2
+  max_pytest_retries_per_case: 3
+
+failure_policy:
+  menu_failure: skip_and_continue
+  config_failure: skip_and_continue
+  environment_failure: block_batch

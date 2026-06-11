@@ -1,0 +1,78 @@
+{
+  "env": {
+    "app_server_host": "10.20.150.149",
+    "app_server_port": "10621",
+    "app_server_user": "root",
+    "app_server_password": "handsome",
+    "log_path_dxfund": "/home/lcpt60/lcpt_jar/lcpt-web-manager-dxfund/logs/",
+    "log_path_dxtrust": "/home/lcpt60/lcpt_jar/lcpt-web-manager-dxtrust/logs/",
+    "log_path_fina": "/home/lcpt60/lcpt_jar/lcpt-web-manager-fina/logs/",
+    "log_path_dxcp": "/home/lcpt60/lcpt_jar/lcpt-web-manager-dxcp/logs/",
+    "log_path_pension": "/home/lcpt60/lcpt_jar/lcpt-web-manager-pension/logs/",
+    "log_file": "lcpt-manager.log",
+    "log_file_stdout": "manager-stdout.log",
+    "env_key": "ifm60-trust",
+    "project_dir": "F:/python_project",
+    "update_cache": "信托",
+    "cdp_url": "http://localhost:9222",
+    "chrome_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "branch_user": "fh001",
+    "branch_password": "11111111"
+  },
+  "menu": {
+    "状态": "未完成",
+    "菜单名称": "信托代销客户历史份额变动流水查询",
+    "导航一级菜单": "信托代销",
+    "导航二级菜单": "查询管理",
+    "导航三级菜单": "信托代销客户历史份额变动流水查询"
+  },
+  "presets": {
+    "ta_code_1": "JS",
+    "ta_name_1": "嘉实基金",
+    "ta_option_1": "JS:嘉实基金",
+    "ta_code_2": "HT",
+    "ta_name_2": "HT基金",
+    "ta_option_2": "HT:HT基金",
+    "prd_code": "11",
+    "prd_name": "AI自动化测试产品",
+    "prd_type": "0:保证收益类",
+    "customer_id": "A3060210020001",
+    "account_type": "0:入账账号",
+    "customer_id_type": "0:入账账号",
+    "query_date_start": "2026-01-01",
+    "query_date_end": "2026-12-31",
+    "hq_branch_no": "100",
+    "hq_branch_name": "总行",
+    "branch_no": "0011",
+    "branch_name": "交通银行股份有限公司0011分行",
+    "prd_option": "11:AI自动化测试产品",
+    "org_select": "0:按开户机构",
+    "trans_channel": "0:柜台交易",
+    "biz_code": "122:申购",
+    "status": "2:已入账",
+    "square_no": "SQ20260101001",
+    "apply_no": "AP20260101001"
+  },
+  "field_groups": [
+    {
+      "name": "客户标识组",
+      "fields": [
+        "客户标识类型",
+        "客户标识"
+      ],
+      "order": [
+        "客户标识类型",
+        "客户标识"
+      ],
+      "aliases": {
+        "账户类型": "客户标识类型",
+        "账号": "客户标识"
+      }
+    }
+  ],
+  "computed": {
+    "menu_url": "/console-dxtrust-vue/ifmDxTrustQueryManage/ifmCCxglDxTrustShareinfo/ifmCDxTrustHisCltShareChg/",
+    "module": "if",
+    "test_case_dir": "testcases\\综合理财平台6.0\\信托代销"
+  }
+}

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hui-playwright-agent"
+version = "0.1.0"
+description = "LangGraph workflow agent wrapper for the HUI Playwright test generation skill."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "langgraph>=0.2.60",
+  "langgraph-checkpoint-sqlite>=2.0.0",
+  "pydantic>=2.0",
+  "PyYAML>=6.0",
+  "sqlglot>=30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+hui-agent = "hui_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

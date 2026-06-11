@@ -1,0 +1,8 @@
+{
+  "name": "hui-playwright-test",
+  "displayName": "HUI+Playwright自动化测试",
+  "version": "1.0",
+  "source": "project",
+  "sourcePath": "F:/workbuddy-space/wealth-test-skill-correct/skills/ifms6-test-skill/hui-playwright-test",
+  "description": "HUI+Playwright自动化测试框架，支持菜单发现、配置读取、表单探勘、日志抓取、SQL预埋、用例生成、迭代验证、报告导出"
+}

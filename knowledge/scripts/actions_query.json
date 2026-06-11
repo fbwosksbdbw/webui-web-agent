@@ -1,0 +1,12 @@
+[
+  {"action": "click", "label": "重置"},
+  {"action": "select", "label": "产品代码", "value": "UI_HT_P001:UI自动化HT信托产品"},
+  {"action": "select", "label": "产品模板", "value": "__FIRST_OPTION__"},
+  {"action": "fill", "label": "开始日期", "value": "2026-01-01"},
+  {"action": "fill", "label": "结束日期", "value": "2026-12-31"},
+  {"action": "select", "label": "客户类型", "value": "__FIRST_OPTION__"},
+  {"action": "select", "label": "时间选择", "value": "__FIRST_OPTION__"},
+  {"action": "select", "label": "统计层数", "value": "__FIRST_OPTION__"},
+  {"action": "select", "label": "TA代码", "value": "HT:HT基金"},
+  {"action": "click", "label": "查询"}
+]

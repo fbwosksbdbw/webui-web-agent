@@ -1,0 +1,78 @@
+{
+  "owner": "{owner}",
+  "menu": {
+    "name": "{菜单名}",
+    "code": "{功能代码}",
+    "url": "{menu_url}",
+    "module": "{module}",
+    "level1": "{一级菜单}",
+    "level2": "{二级菜单}"
+  },
+
+  "gate_decisions": {
+    "has_required_fields": {has_required_fields},
+    "has_customer_fields": {has_customer_fields},
+    "customer_route": {customer_route},
+    "has_branch_column": {has_branch_column},
+    "has_indirect_branch_filter": {has_indirect_branch_filter},
+    "branch_source": "{branch_source}",
+    "branch_filter_column": "{branch_filter_column}",
+    "case_count": {case_count},
+    "queryall_template": "{queryall_template}",
+    "ta_multi_select": {ta_multi_select},
+    "explore_route": "{explore_route}"
+  },
+
+  "case_order": [
+    {case_order}
+  ],
+
+  "form_fields": {
+    "all": [
+      {all_fields_json}
+    ],
+    "required": [
+      {required_fields_json}
+    ],
+    "excluded_fields": {excluded_fields_json},
+    "reset_test_field": {reset_field_json},
+    "preview_buttons": {preview_buttons_json}
+  },
+
+  "field_groups": {field_groups_json},
+
+  "filter_selections": {
+    "single": {
+      "group": "{single_group}",
+      "fields": [{single_fields_json}]
+    },
+    "multi": "ALL"
+  },
+
+  "preset_strategy": {
+    "queryall_table": "",
+    "queryall_type": "",
+    "base_tables": [],
+    "biz_tables": [],
+    "preset_tables": [],
+    "branch_test_method": "querysingle",
+    "branch_filter": {}
+  },
+
+  "shard": {
+    "db": "{shard_db}",
+    "routing_db": "{routing_db_或空字符串}",
+    "physical_tables": {}
+  },
+
+  "expected_counts": {
+    "branch": {branch_expected_count},
+    "headquarter": {headquarter_expected_count}
+  },
+
+  "paths": {
+    "project_dir": "{project_dir}",
+    "test_case_dir": "{test_case_dir}",
+    "templates": {templates_mapping}
+  }
+}
