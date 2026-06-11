@@ -1845,6 +1845,49 @@ def test_insert_plan_consumes_sql_requirements_for_query_match_columns():
     assert values["custom_filter"].source == "sql_requirements.required_match.log_analysis.literal.custom_filter"
 
 
+def test_insert_plan_consumes_alias_requirement_predicate_values():
+    case_plan = {
+        "preset_strategy": {"base_tables": ["biztable"], "biz_tables": []},
+        "shard": {"physical_tables": {"biztable": ["biztable"]}},
+        "sql_requirements": [
+            {
+                "table": "biztable",
+                "physical_tables": ["biztable"],
+                "role": "base",
+                "columns": [],
+                "alias_requirements": [
+                    {
+                        "table": "biztable",
+                        "alias": "b",
+                        "predicates": [
+                            {
+                                "column": "custom_filter",
+                                "operator": "=",
+                                "values": ["X1"],
+                                "source": "log_analysis.alias.b.custom_filter",
+                            }
+                        ],
+                        "joins": [],
+                    }
+                ],
+            }
+        ],
+    }
+    schema_cache = {
+        "biztable": {
+            "required_columns": [],
+            "all_columns": ["custom_filter"],
+        }
+    }
+
+    plans, skipped = build_insert_plans(case_plan, schema_cache=schema_cache, include_skipped=True)
+
+    assert skipped == []
+    values = {column.name: column for column in plans[0].columns}
+    assert values["custom_filter"].value == "X1"
+    assert values["custom_filter"].source == "sql_requirements.alias.b.log_analysis.alias.b.custom_filter"
+
+
 def test_insert_plan_requirement_values_override_base_template_values():
     case_plan = {
         "presets": {"prd_code": "P1"},

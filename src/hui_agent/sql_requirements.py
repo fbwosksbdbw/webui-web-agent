@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from dataclasses import field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -29,21 +30,71 @@ class SqlColumnRequirement:
 
 
 @dataclass(frozen=True)
+class SqlAliasPredicate:
+    column: str
+    operator: str
+    values: list[str]
+    source: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "column": self.column,
+            "operator": self.operator,
+            "values": self.values,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class SqlAliasJoin:
+    column: str
+    other_alias: str
+    other_column: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "column": self.column,
+            "other_alias": self.other_alias,
+            "other_column": self.other_column,
+        }
+
+
+@dataclass(frozen=True)
+class SqlAliasRequirement:
+    table: str
+    alias: str
+    predicates: list[SqlAliasPredicate]
+    joins: list[SqlAliasJoin]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "table": self.table,
+            "alias": self.alias,
+            "predicates": [predicate.to_dict() for predicate in self.predicates],
+            "joins": [join.to_dict() for join in self.joins],
+        }
+
+
+@dataclass(frozen=True)
 class SqlRequirement:
     table: str
     physical_tables: list[str]
     role: str
     columns: list[SqlColumnRequirement]
     source_sql: list[str]
+    alias_requirements: list[SqlAliasRequirement] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "table": self.table,
             "physical_tables": self.physical_tables,
             "role": self.role,
             "columns": [column.to_dict() for column in self.columns],
             "source_sql": self.source_sql,
         }
+        if self.alias_requirements:
+            payload["alias_requirements"] = [item.to_dict() for item in self.alias_requirements]
+        return payload
 
 
 def build_sql_requirements(
@@ -80,6 +131,7 @@ def build_sql_requirements(
                     role=role,
                     columns=column_requirements,
                     source_sql=_raw_sqls_for_table(table, raw_sqls),
+                    alias_requirements=_alias_requirements_for_table(table, raw_sqls),
                 )
             )
     return result
@@ -178,6 +230,154 @@ def _literal_list_values(text: str) -> list[str]:
     if quoted:
         return quoted
     return [match.group(1) for match in re.finditer(r"(?:^|,)\s*(\d{4,})\s*(?=,|$)", text)]
+
+
+def _alias_requirements_for_table(table: str, raw_sqls: list[str]) -> list[SqlAliasRequirement]:
+    target = _logical_table_name(table).lower()
+    by_alias: dict[str, SqlAliasRequirement] = {}
+    for raw_sql in raw_sqls:
+        hydrated = _hydrate_current_params_sql(raw_sql)
+        alias_to_table = _sql_table_aliases(hydrated)
+        predicates = _sql_alias_predicates(hydrated)
+        joins = _sql_alias_joins(hydrated)
+        for alias, observed_table in alias_to_table.items():
+            if _logical_table_name(observed_table).lower() != target:
+                continue
+            alias_predicates = predicates.get(alias, [])
+            alias_joins = joins.get(alias, [])
+            if not alias_predicates and not alias_joins:
+                continue
+            existing = by_alias.get(alias)
+            if existing is None:
+                by_alias[alias] = SqlAliasRequirement(
+                    table=observed_table,
+                    alias=alias,
+                    predicates=alias_predicates,
+                    joins=alias_joins,
+                )
+            else:
+                by_alias[alias] = SqlAliasRequirement(
+                    table=existing.table,
+                    alias=existing.alias,
+                    predicates=_dedupe_alias_predicates([*existing.predicates, *alias_predicates]),
+                    joins=_dedupe_alias_joins([*existing.joins, *alias_joins]),
+                )
+    return [by_alias[alias] for alias in sorted(by_alias)]
+
+
+def _sql_table_aliases(sql: str) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for match in re.finditer(
+        r"\bjoin\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*)\b",
+        sql,
+        flags=re.IGNORECASE,
+    ):
+        aliases.setdefault(match.group(2), match.group(1))
+    from_match = re.search(
+        r"\bfrom\s+(.*?)(?:\bwhere\b|\bgroup\b|\border\b|\bhaving\b|$)",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not from_match:
+        return aliases
+    for segment in from_match.group(1).split(","):
+        match = re.match(
+            r"\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?",
+            segment,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        table = match.group(1)
+        alias = match.group(2) or table
+        if alias.lower() in {"join", "on", "where", "left", "right", "inner", "outer", "full"}:
+            alias = table
+        aliases.setdefault(alias, table)
+    return aliases
+
+
+def _sql_alias_predicates(sql: str) -> dict[str, list[SqlAliasPredicate]]:
+    result: dict[str, list[SqlAliasPredicate]] = {}
+    for match in re.finditer(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b\s+in\s*\(([^)]*)\)",
+        sql,
+        flags=re.IGNORECASE,
+    ):
+        values = _literal_list_values(match.group(3))
+        if values:
+            _append_alias_predicate(result, match.group(1), match.group(2), "in", values)
+    for match in re.finditer(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b\s*(=|>=|>|<=|<)\s*'([^']*)'",
+        sql,
+        flags=re.IGNORECASE,
+    ):
+        _append_alias_predicate(result, match.group(1), match.group(2), match.group(3), [match.group(4)])
+    for match in re.finditer(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b\s*(=|>=|>|<=|<)\s*(\d{4,})",
+        sql,
+        flags=re.IGNORECASE,
+    ):
+        _append_alias_predicate(result, match.group(1), match.group(2), match.group(3), [match.group(4)])
+    for alias, predicates in list(result.items()):
+        result[alias] = _dedupe_alias_predicates(predicates)
+    return result
+
+
+def _append_alias_predicate(
+    result: dict[str, list[SqlAliasPredicate]],
+    alias: str,
+    column: str,
+    operator: str,
+    values: list[str],
+) -> None:
+    result.setdefault(alias, []).append(
+        SqlAliasPredicate(
+            column=column,
+            operator=operator.lower(),
+            values=values,
+            source=f"log_analysis.alias.{alias}.{column}",
+        )
+    )
+
+
+def _sql_alias_joins(sql: str) -> dict[str, list[SqlAliasJoin]]:
+    result: dict[str, list[SqlAliasJoin]] = {}
+    for match in re.finditer(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b\s*=\s*"
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b",
+        sql,
+        flags=re.IGNORECASE,
+    ):
+        left_alias, left_column, right_alias, right_column = match.groups()
+        result.setdefault(left_alias, []).append(SqlAliasJoin(left_column, right_alias, right_column))
+        result.setdefault(right_alias, []).append(SqlAliasJoin(right_column, left_alias, left_column))
+    for alias, joins in list(result.items()):
+        result[alias] = _dedupe_alias_joins(joins)
+    return result
+
+
+def _dedupe_alias_predicates(values: list[SqlAliasPredicate]) -> list[SqlAliasPredicate]:
+    result: list[SqlAliasPredicate] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for value in values:
+        key = (value.column, value.operator, tuple(value.values))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def _dedupe_alias_joins(values: list[SqlAliasJoin]) -> list[SqlAliasJoin]:
+    result: list[SqlAliasJoin] = []
+    seen: set[tuple[str, str, str]] = set()
+    for value in values:
+        key = (value.column, value.other_alias, value.other_column)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
 
 
 def _hydrate_current_params_sql(raw_sql: str) -> str:

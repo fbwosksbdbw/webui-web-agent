@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1669,7 +1670,14 @@ PASSED {ok_test}::test_ok
     assert result.completed_steps == ["4"]
     assert len(calls) == 3
     assert str(bad_test) in calls[0] and str(ok_test) in calls[0]
-    assert calls[1] == [sys.executable, "-m", "pytest", f"{bad_test}::test_bad", "-q"]
+    assert calls[1] == [
+        sys.executable,
+        "-m",
+        "pytest",
+        f"{bad_test}::test_bad",
+        "-q",
+        f"--rootdir={tmp_path}",
+    ]
     assert str(bad_test) in calls[2] and str(ok_test) in calls[2]
     phases = [attempt["phase"] for attempt in case_plan["verification_attempts"]]
     assert phases == ["full", "target", "regression"]
@@ -1747,7 +1755,14 @@ Call log:
 
     case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
     assert result.completed_steps == ["4"]
-    assert calls[1] == [sys.executable, "-m", "pytest", f"{querymulti}::test_FUNC_querymulti", "-q"]
+    assert calls[1] == [
+        sys.executable,
+        "-m",
+        "pytest",
+        f"{querymulti}::test_FUNC_querymulti",
+        "-q",
+        f"--rootdir={tmp_path}",
+    ]
     assert case_plan["verification"]["status"] == "passed"
     assert case_plan["verification"]["qualification"] == "all_cases_passed_across_attempts"
 
@@ -2293,6 +2308,26 @@ def test_run_pytest_streams_case_results_and_output_lines(tmp_path):
         "test_ok": "PASSED",
         "test_bad": "FAILED",
     }
+
+
+def test_run_pytest_streaming_uses_stable_default_cwd(monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        stdout = iter(())
+
+        def wait(self):
+            return 0
+
+    def fake_popen(command, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        return FakeProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    _run_pytest(["test_fake.py"], event_logger=lambda event: None, attempt_no=1)
+
+    assert captured["cwd"] == str(Path(__file__).resolve().parents[1])
 
 
 def test_report_writes_summary_markdown(tmp_path):

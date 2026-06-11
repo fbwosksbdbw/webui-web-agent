@@ -354,14 +354,49 @@ def _requirement_columns_by_table(case_plan: dict[str, Any]) -> dict[str, list[I
                 continue
             purpose = str(column.get("purpose") or "requirement")
             source = str(column.get("source") or "")
-            result.setdefault(table, []).append(
+            _append_requirement_column(
+                result,
+                table,
                 InsertColumn(
                     name=name,
                     value=value,
                     source="sql_requirements." + purpose + (f".{source}" if source else ""),
-                )
+                ),
             )
+        for alias_requirement in (
+            requirement.get("alias_requirements", []) if isinstance(requirement.get("alias_requirements"), list) else []
+        ):
+            if not isinstance(alias_requirement, dict):
+                continue
+            alias = str(alias_requirement.get("alias") or "").strip()
+            for predicate in (
+                alias_requirement.get("predicates", []) if isinstance(alias_requirement.get("predicates"), list) else []
+            ):
+                if not isinstance(predicate, dict):
+                    continue
+                name = str(predicate.get("column") or "").strip()
+                values = predicate.get("values", [])
+                value = str(values[0]) if isinstance(values, list) and values else ""
+                if not name or value == "":
+                    continue
+                source = str(predicate.get("source") or "")
+                _append_requirement_column(
+                    result,
+                    table,
+                    InsertColumn(
+                        name=name,
+                        value=value,
+                        source="sql_requirements.alias." + alias + (f".{source}" if source else ""),
+                    ),
+                )
     return result
+
+
+def _append_requirement_column(result: dict[str, list[InsertColumn]], table: str, column: InsertColumn) -> None:
+    columns = result.setdefault(table, [])
+    if any(existing.name == column.name for existing in columns):
+        return
+    columns.append(column)
 
 
 def _requirement_specs_by_table(case_plan: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:

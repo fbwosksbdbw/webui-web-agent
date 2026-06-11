@@ -141,3 +141,55 @@ def test_sql_requirements_use_in_predicate_literals_as_trusted_values():
     assert columns["busin_code"].expected_value == "120"
     assert columns["busin_code"].source == "log_analysis.literal.busin_code"
     assert columns["prd_code"].expected_value == "cycleset01"
+
+
+def test_sql_requirements_record_alias_predicates_and_join_edges_for_self_join():
+    case_plan = {
+        "preset_strategy": {"base_tables": ["tbdxfundtranscfmqry"], "biz_tables": []},
+        "shard": {"physical_tables": {"tbdxfundtranscfmqry": ["tbdxfundtranscfmqry"]}},
+        "log_analysis": {
+            "requirements": {
+                "where_columns": {"tbdxfundtranscfmqry": ["busin_code", "prd_code"]},
+                "join_key_columns": {"tbdxfundtranscfmqry": ["in_client_no", "prd_code"]},
+                "raw_sqls": [
+                    "select * from tbdxfundtranscfmqry a,tbdxfundtranscfmqry b "
+                    "where a.in_client_no = b.in_client_no "
+                    "and a.prd_code = b.prd_code "
+                    "and a.busin_code in ('120','122','130','139') "
+                    "and b.busin_code in ('124','142') "
+                    "and a.prd_code='cycleset01'"
+                ],
+            }
+        },
+    }
+    schema_cache = {
+        "tbdxfundtranscfmqry": {
+            "required_columns": [],
+            "all_columns": ["in_client_no", "prd_code", "busin_code"],
+        }
+    }
+
+    requirements = build_sql_requirements(case_plan, schema_cache=schema_cache)
+
+    alias_requirements = {item.alias: item for item in requirements[0].alias_requirements}
+    assert set(alias_requirements) == {"a", "b"}
+    a_predicates = {item.column: item for item in alias_requirements["a"].predicates}
+    b_predicates = {item.column: item for item in alias_requirements["b"].predicates}
+    assert a_predicates["busin_code"].operator == "in"
+    assert a_predicates["busin_code"].values == ["120", "122", "130", "139"]
+    assert a_predicates["prd_code"].operator == "="
+    assert a_predicates["prd_code"].values == ["cycleset01"]
+    assert b_predicates["busin_code"].values == ["124", "142"]
+    assert [item.to_dict() for item in alias_requirements["a"].joins] == [
+        {
+            "column": "in_client_no",
+            "other_alias": "b",
+            "other_column": "in_client_no",
+        },
+        {
+            "column": "prd_code",
+            "other_alias": "b",
+            "other_column": "prd_code",
+        },
+    ]
+    assert requirements[0].to_dict()["alias_requirements"][0]["alias"] == "a"

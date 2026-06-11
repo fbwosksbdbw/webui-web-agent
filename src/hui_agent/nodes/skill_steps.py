@@ -2401,11 +2401,12 @@ def _run_pytest(
     cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = _pytest_command(pytest_paths, stream=event_logger is not None, env_name=env_name)
+    run_cwd = cwd or _default_pytest_cwd()
     if event_logger is not None:
-        return _run_pytest_streaming(command, event_logger, attempt_no, cwd=cwd)
+        return _run_pytest_streaming(command, event_logger, attempt_no, cwd=run_cwd)
     return subprocess.run(
         command,
-        cwd=cwd,
+        cwd=run_cwd,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -2416,14 +2417,16 @@ def _run_pytest(
 
 def _pytest_command(pytest_paths: list[str], *, stream: bool, env_name: str = "") -> list[str]:
     env_args = [f"--env={env_name}"] if env_name else []
+    rootdir_args = _pytest_rootdir_args(pytest_paths)
     if not stream:
-        return [sys.executable, "-m", "pytest", *pytest_paths, "-q", *env_args]
+        return [sys.executable, "-m", "pytest", *pytest_paths, "-q", *env_args, *rootdir_args]
     return [
         sys.executable,
         "-m",
         "pytest",
         *pytest_paths,
         *env_args,
+        *rootdir_args,
         "-vv",
         "-s",
         "--tb=short",
@@ -2433,6 +2436,31 @@ def _pytest_command(pytest_paths: list[str], *, stream: bool, env_name: str = ""
         "-o",
         "log_cli_level=INFO",
     ]
+
+
+def _pytest_rootdir_args(pytest_paths: list[str]) -> list[str]:
+    roots: list[str] = []
+    for item in pytest_paths:
+        path_text = str(item or "").split("::", 1)[0]
+        if not path_text:
+            continue
+        path = Path(path_text)
+        if not path.is_absolute():
+            path = Path(_default_pytest_cwd()) / path
+        root = path if path.is_dir() else path.parent
+        if str(root):
+            roots.append(str(root))
+    if not roots:
+        return []
+    try:
+        rootdir = os.path.commonpath(roots)
+    except ValueError:
+        rootdir = roots[0]
+    return [f"--rootdir={rootdir}"]
+
+
+def _default_pytest_cwd() -> str:
+    return str(Path(__file__).resolve().parents[3])
 
 
 def _run_pytest_streaming(command: list[str], event_logger, attempt_no: int, *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -2493,7 +2521,7 @@ def _parse_live_pytest_case_result(line: str, current_nodeid: str = "") -> tuple
         nodeid = match.group("nodeid")
         return _pytest_case_event(nodeid, match.group("status")), ""
     status_match = re.match(r"^(?P<status>PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b", clean)
-    if status_match and current_nodeid:
+    if status_match and current_nodeid and clean == status_match.group("status"):
         return _pytest_case_event(current_nodeid, status_match.group("status")), ""
     nodeid = _extract_live_pytest_nodeid(clean)
     if nodeid:
