@@ -148,6 +148,61 @@ const log = {
   error: (...a: any[]) => console.error("[ERROR]", ...a),
 };
 
+export function normalizeFormLabel(value: string): string {
+  return String(value || "").replace(/\*/g, "").replace(/\s+/g, "").trim();
+}
+
+export function formLabelMatches(actual: string, expected: string): boolean {
+  return normalizeFormLabel(actual) === normalizeFormLabel(expected);
+}
+
+export function uniqueInteractiveFields(fields: ExploreField[]): ExploreField[] {
+  const seen = new Map<string, ExploreField>();
+  for (const field of fields) {
+    if (!field.label || field.type === "button") continue;
+    const key = `${field.label}::${field.type}`;
+    if (seen.has(key)) {
+      seen.delete(key);
+    }
+    seen.set(key, field);
+  }
+  return [...seen.values()];
+}
+
+export function cascadeCandidateFields(fields: ExploreField[]): ExploreField[] {
+  const triggerLabels = new Set<string>();
+  for (const field of fields) {
+    for (const trigger of field.conditionalRequiredBy || []) {
+      if (trigger) triggerLabels.add(trigger);
+    }
+  }
+  if (triggerLabels.size === 0) {
+    return [];
+  }
+  return uniqueInteractiveFields(fields).filter(
+    (field) => field.type === "single-select" && triggerLabels.has(field.label)
+  );
+}
+
+async function formItemByExactLabel(page: any, label: string): Promise<any | null> {
+  const index = await page.evaluate((target: string) => {
+    const normalize = (value: string) =>
+      String(value || "").replace(/\*/g, "").replace(/\s+/g, "").trim();
+    const expected = normalize(target);
+    const formItems = Array.from(document.querySelectorAll(".h-form-item"));
+    return formItems.findIndex((item: Element) => {
+      const labelEl = item.querySelector(
+        ".h-form-item-label, .h-form-label, .h-form-item-label-wrap"
+      );
+      return normalize(labelEl?.textContent || "") === expected;
+    });
+  }, label);
+  if (index < 0) {
+    return null;
+  }
+  return page.locator(".h-form-item").nth(index);
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  HTTP 工具
 // ═══════════════════════════════════════════════════════════════
@@ -443,7 +498,7 @@ async function extractSelectOptions(
   fields: ExploreField[]
 ): Promise<Map<string, string[]>> {
   const optionMap = new Map<string, string[]>();
-  const selectFields = fields.filter(
+  const selectFields = uniqueInteractiveFields(fields).filter(
     (f) => f.type === "single-select" || f.type === "multi-select"
   );
 
@@ -458,11 +513,12 @@ async function extractSelectOptions(
       await new Promise((r) => setTimeout(r, 200));
 
       // 点击 trigger 触发选项懒加载（如果失败不阻断，继续尝试提取）
-      const trigger = page
-        .locator(".h-form-item")
-        .filter({ hasText: field.label })
-        .locator(".h-select-input, .h-select-multiple, .h-select")
-        .first();
+      const formItem = await formItemByExactLabel(page, field.label);
+      if (!formItem) {
+        log.debug(`Exact form item not found for "${field.label}", skipping option extraction`);
+        continue;
+      }
+      const trigger = formItem.locator(".h-select-input, .h-select-multiple, .h-select").first();
 
       const triggerCount = await trigger.count();
       if (triggerCount > 0) {
@@ -503,8 +559,10 @@ async function extractSelectOptions(
         };
         const formItems = Array.from(document.querySelectorAll(".h-form-item"));
         for (const item of formItems) {
-          const labelEl = item.querySelector(".h-form-item-label, .h-form-label");
-          if (!labelEl || !labelEl.textContent?.includes(label)) continue;
+          const labelEl = item.querySelector(".h-form-item-label, .h-form-label, .h-form-item-label-wrap");
+          const normalize = (value: string) =>
+            String(value || "").replace(/\*/g, "").replace(/\s+/g, "").trim();
+          if (!labelEl || normalize(labelEl.textContent || "") !== normalize(label)) continue;
 
           // 排除小尺寸分页组件
           if (item.querySelector(".h-select-small")) continue;
@@ -555,17 +613,15 @@ async function exploreCascadeFields(
   const newFields: ExploreField[] = [];
   const existingLabels = new Set(existingFields.map(f => f.label));
 
-  // 只对 single-select 类型的字段进行级联探勘
-  const selectFields = existingFields.filter(f => f.type === "single-select");
+  // 只探勘 Vue 规则确认过的触发字段，避免普通下拉被重复选择。
+  const selectFields = cascadeCandidateFields(existingFields);
 
   for (const field of selectFields) {
     try {
       // 点击下拉框
-      const trigger = page
-        .locator(".h-form-item")
-        .filter({ hasText: field.label })
-        .locator(".h-select-input")
-        .first();
+      const formItem = await formItemByExactLabel(page, field.label);
+      if (!formItem) continue;
+      const trigger = formItem.locator(".h-select-input").first();
 
       const triggerCount = await trigger.count();
       if (triggerCount === 0) continue;
@@ -1134,6 +1190,9 @@ async function main() {
       log.info(`AI 增强完成: ${results.length} 个元素 (${aiTime}ms)`);
     }
 
+    // 交互前先去重，避免同一字段在抓选项和级联探勘阶段被重复点击。
+    results = finalize(results);
+
     // ─── Step 3.5: 抓取下拉选项 ───
     log.info("抓取下拉选项...");
     const optsStart = Date.now();
@@ -1217,4 +1276,6 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
