@@ -1798,6 +1798,51 @@ def test_insert_plan_requirement_values_override_base_template_values():
     assert values["prd_type"].source == "sql_requirements.required_match.log_analysis.literal.prd_type"
 
 
+def test_insert_plan_blocks_required_match_columns_from_generated_defaults():
+    case_plan = {
+        "preset_strategy": {"base_tables": [], "biz_tables": ["biztable"]},
+        "shard": {"physical_tables": {"biztable": ["biztable"]}},
+        "sql_requirements": [
+            {
+                "table": "biztable",
+                "physical_tables": ["biztable"],
+                "role": "business",
+                "columns": [
+                    {
+                        "column": "serial_no",
+                        "purpose": "required_match",
+                        "expected_value": "",
+                        "source": "",
+                        "allow_default": False,
+                        "reason": "where_columns",
+                    }
+                ],
+                "source_sql": [],
+            }
+        ],
+    }
+    schema_cache = {
+        "biztable": {
+            "required_columns": ["serial_no"],
+            "all_columns": ["serial_no"],
+            "column_types": {"serial_no": "varchar(32)"},
+        }
+    }
+
+    plans, skipped = build_insert_plans(case_plan, schema_cache=schema_cache, include_skipped=True)
+
+    assert plans == []
+    assert skipped == [
+        {
+            "table": "biztable",
+            "physical_table": "biztable",
+            "role": "business",
+            "reason": "missing_requirement_values",
+            "missing_columns": ["serial_no"],
+        }
+    ]
+
+
 def test_insert_plan_uses_semantic_mapping_for_chinese_label_aliases():
     case_plan = {
         "form_fields": {

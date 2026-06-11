@@ -80,6 +80,7 @@ def build_insert_plans(
     value_context = _build_value_context(case_plan)
     join_key_columns = _join_key_columns(case_plan)
     requirement_columns = _requirement_columns_by_table(case_plan)
+    requirement_specs = _requirement_specs_by_table(case_plan)
     plans: list[InsertPlan] = []
     skipped: list[dict[str, Any]] = []
     promoted_base_tables = _promoted_no_insert_base_tables(case_plan, schema_cache)
@@ -103,6 +104,13 @@ def build_insert_plans(
                 if rows is None and _has_permission_cases(case_plan):
                     rows = _permission_rows(table, schema, columns, value_context)
                 effective_columns = rows[0] if rows else columns
+                missing_requirement_values = _missing_blocking_requirement_values(
+                    requirement_specs.get(_logical_table_name(table), []),
+                    effective_columns,
+                )
+                if missing_requirement_values:
+                    skipped.append(_skip(table, physical, role, "missing_requirement_values", missing_requirement_values))
+                    continue
                 missing_required = [
                     column
                     for column in schema.required_columns
@@ -325,6 +333,45 @@ def _requirement_columns_by_table(case_plan: dict[str, Any]) -> dict[str, list[I
                 )
             )
     return result
+
+
+def _requirement_specs_by_table(case_plan: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    for requirement in case_plan.get("sql_requirements", []) if isinstance(case_plan.get("sql_requirements"), list) else []:
+        if not isinstance(requirement, dict):
+            continue
+        table = _logical_table_name(str(requirement.get("table") or ""))
+        if not table:
+            continue
+        for column in requirement.get("columns", []) if isinstance(requirement.get("columns"), list) else []:
+            if not isinstance(column, dict):
+                continue
+            name = str(column.get("column") or "").strip()
+            if not name:
+                continue
+            result.setdefault(table, []).append(column)
+    return result
+
+
+def _missing_blocking_requirement_values(requirements: list[dict[str, Any]], columns: list[InsertColumn]) -> list[str]:
+    if not requirements:
+        return []
+    by_name = {column.name: column for column in columns}
+    missing: list[str] = []
+    for requirement in requirements:
+        purpose = str(requirement.get("purpose") or "")
+        if purpose not in {"required_match", "permission_filter"}:
+            continue
+        if bool(requirement.get("allow_default", True)):
+            continue
+        name = str(requirement.get("column") or "").strip()
+        expected = str(requirement.get("expected_value") or "")
+        if not name or expected:
+            continue
+        generated = by_name.get(name)
+        if generated is None or generated.source.startswith("generated."):
+            missing.append(name)
+    return missing
 
 
 def _merge_requirement_columns(columns: list[InsertColumn], requirement_columns: list[InsertColumn]) -> list[InsertColumn]:

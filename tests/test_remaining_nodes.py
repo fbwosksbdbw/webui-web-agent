@@ -607,6 +607,53 @@ def test_sql_generate_fails_instead_of_writing_empty_preset_sql_when_no_insert_p
     assert "INSERT INTO biztable1" in (sql_dir / "preset.sql").read_text(encoding="utf-8")
 
 
+def test_sql_generate_fails_when_required_match_value_would_only_be_defaulted(tmp_path):
+    skill = tmp_path / "skill"
+    case_dir = tmp_path / "case"
+    sql_dir = tmp_path / "sql"
+    case_dir.mkdir()
+    sql_dir.mkdir()
+    (case_dir / "config.json").write_text(json.dumps({"presets": {}}), encoding="utf-8")
+    (case_dir / "case_plan.json").write_text(
+        json.dumps(
+            {
+                "menu": {"name": "菜单A"},
+                "case_inputs": {"querymulti": {"fields": [], "excluded": {}}},
+                "preset_strategy": {"base_tables": [], "biz_tables": ["biztable"]},
+                "shard": {"db": "ui_fund", "physical_tables": {"biztable": ["biztable1"]}},
+                "log_analysis": {
+                    "requirements": {
+                        "where_columns": {"biztable": ["must_have"]},
+                        "raw_sqls": ["select * from biztable where must_have = ?"],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_script(
+        skill / "scripts" / "config_reader.py",
+        "import json\n"
+        f"print(json.dumps({{'base_sql': {json.dumps(str(sql_dir / 'base.sql'))}, 'preset_sql': {json.dumps(str(sql_dir / 'preset.sql'))}}}))\n",
+    )
+    _write_schema_cache(
+        skill,
+        {
+            "biztable1": {
+                "required_columns": ["must_have"],
+                "all_columns": ["must_have"],
+                "column_types": {"must_have": "varchar(32)"},
+            }
+        },
+        "ui_fund",
+    )
+
+    with pytest.raises(Exception, match="missing_requirement_values"):
+        build_default_step_handlers(skill)["2c"](_state(case_dir))
+    assert not (sql_dir / "preset.sql").exists()
+
+
 def test_sql_generate_invokes_llm_when_no_insert_plan_can_be_generated(tmp_path):
     skill = tmp_path / "skill"
     case_dir = tmp_path / "case"
