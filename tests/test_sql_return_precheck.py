@@ -89,6 +89,190 @@ def test_return_precheck_reports_branch_and_headquarter_counts(tmp_path, monkeyp
     assert any("'100'" in sql for sql in conn.cursor_obj.executed)
 
 
+def test_return_precheck_diagnoses_query_predicate_value_mismatches():
+    module = _load_sql_return_precheck()
+    case_plan = {
+        "insert_plans": [
+            {
+                "table": "biztable",
+                "physical_table": "biztable",
+                "columns": [
+                    {"name": "bank_acc", "value": "A1", "source": "form_fields.客户标识"},
+                    {"name": "prd_code", "value": "P1", "source": "presets.prd_code"},
+                ],
+            }
+        ]
+    }
+
+    diagnostics = module._diagnose_return_check_failure(
+        "select * from biztable where bank_acc='A2' and prd_code='P1' and ta_code='HT'",
+        case_plan,
+    )
+
+    assert diagnostics == {
+        "tables": ["biztable"],
+        "predicate_checks": [
+            {
+                "table": "biztable",
+                "column": "bank_acc",
+                "query_value": "A2",
+                "insert_value": "A1",
+                "status": "mismatch",
+                "source": "form_fields.客户标识",
+            },
+            {
+                "table": "biztable",
+                "column": "prd_code",
+                "query_value": "P1",
+                "insert_value": "P1",
+                "status": "matched",
+                "source": "presets.prd_code",
+            },
+            {
+                "table": "biztable",
+                "column": "ta_code",
+                "query_value": "HT",
+                "insert_value": "",
+                "status": "missing_insert_value",
+                "source": "",
+            },
+        ],
+        "summary": "bank_acc mismatch query=A2 insert=A1; ta_code missing_insert_value query=HT",
+    }
+
+
+def test_return_precheck_diagnostics_do_not_match_missing_empty_insert_value():
+    module = _load_sql_return_precheck()
+    case_plan = {"insert_plans": [{"table": "biztable", "columns": []}]}
+
+    diagnostics = module._diagnose_return_check_failure(
+        "select * from biztable where ta_code=''",
+        case_plan,
+    )
+
+    assert diagnostics["predicate_checks"][0]["status"] == "missing_insert_value"
+
+
+def test_return_precheck_diagnostics_use_table_aliases_for_duplicate_columns():
+    module = _load_sql_return_precheck()
+    case_plan = {
+        "insert_plans": [
+            {
+                "table": "lefttable",
+                "columns": [{"name": "bank_acc", "value": "L1", "source": "form_fields.左客户"}],
+            },
+            {
+                "table": "righttable",
+                "columns": [{"name": "bank_acc", "value": "R1", "source": "form_fields.右客户"}],
+            },
+        ]
+    }
+
+    diagnostics = module._diagnose_return_check_failure(
+        "select * from lefttable l join righttable r on l.client_no=r.client_no "
+        "where r.bank_acc='R2' and l.bank_acc='L1'",
+        case_plan,
+    )
+
+    assert diagnostics["predicate_checks"] == [
+        {
+            "table": "righttable",
+            "column": "bank_acc",
+            "query_value": "R2",
+            "insert_value": "R1",
+            "status": "mismatch",
+            "source": "form_fields.右客户",
+        },
+        {
+            "table": "lefttable",
+            "column": "bank_acc",
+            "query_value": "L1",
+            "insert_value": "L1",
+            "status": "matched",
+            "source": "form_fields.左客户",
+        },
+    ]
+
+
+def test_return_precheck_diagnostics_include_comma_join_table_aliases():
+    module = _load_sql_return_precheck()
+    case_plan = {
+        "insert_plans": [
+            {
+                "table": "lefttable",
+                "columns": [{"name": "bank_acc", "value": "L1", "source": "form_fields.左客户"}],
+            },
+            {
+                "table": "righttable",
+                "columns": [{"name": "bank_acc", "value": "R1", "source": "form_fields.右客户"}],
+            },
+        ]
+    }
+
+    diagnostics = module._diagnose_return_check_failure(
+        "select l.bank_acc,r.bank_acc from lefttable l, righttable r "
+        "where r.bank_acc='R2'",
+        case_plan,
+    )
+
+    assert diagnostics["tables"] == ["lefttable", "righttable"]
+    assert diagnostics["predicate_checks"][0]["table"] == "righttable"
+
+
+def test_return_precheck_attaches_diagnostics_when_query_returns_zero(tmp_path, monkeypatch):
+    module = _load_sql_return_precheck()
+    conn = FakeConnection()
+    monkeypatch.setattr(module.dry_run_sql, "_load_db_config", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(module.dry_run_sql, "_connect", lambda *_args, **_kwargs: conn)
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "preset.sql").write_text(
+        "DELETE FROM biztable WHERE bank_acc='A1';\n"
+        "INSERT INTO biztable(bank_acc,prd_code) VALUES('A1','P1');\n",
+        encoding="utf-8",
+    )
+    config_path = case_dir / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    case_plan_path = case_dir / "case_plan.json"
+    case_plan_path.write_text(
+        json.dumps(
+            {
+                "sql_paths": {"preset_sql": "preset.sql"},
+                "insert_plans": [
+                    {
+                        "table": "biztable",
+                        "columns": [
+                            {"name": "bank_acc", "value": "A1", "source": "form_fields.客户标识"},
+                            {"name": "prd_code", "value": "P1", "source": "presets.prd_code"},
+                        ],
+                    }
+                ],
+                "log_analysis": {
+                    "requirements": {
+                        "raw_sqls": ["select * from biztable where bank_acc='A2' and prd_code='P1'"]
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_fund")
+
+    assert result["status"] == "failed"
+    diagnostics = result["checks"][0]["diagnostics"]
+    assert diagnostics["summary"] == "bank_acc mismatch query=A2 insert=A1"
+    assert diagnostics["predicate_checks"][0] == {
+        "table": "biztable",
+        "column": "bank_acc",
+        "query_value": "A2",
+        "insert_value": "A1",
+        "status": "mismatch",
+        "source": "form_fields.客户标识",
+    }
+
+
 def test_headquarter_permission_sql_expands_branch_in_predicate():
     module = _load_sql_return_precheck()
 

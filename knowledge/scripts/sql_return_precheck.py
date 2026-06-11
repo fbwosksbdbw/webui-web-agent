@@ -102,9 +102,20 @@ def run_precheck(case_plan_path: Path, config_path: Path, db_key: str, env_overr
                 query_cursor.execute(count_sql)
                 row = query_cursor.fetchone()
                 count = _first_count_value(row)
-                checks.append({"sql_index": index, "status": "passed" if count > 0 else "failed", "count": count, "sql": raw_sql})
+                check = {"sql_index": index, "status": "passed" if count > 0 else "failed", "count": count, "sql": raw_sql}
+                if count <= 0:
+                    check["diagnostics"] = _diagnose_return_check_failure(raw_sql, case_plan)
+                checks.append(check)
             except Exception as exc:  # noqa: BLE001
-                checks.append({"sql_index": index, "status": "failed", "count": 0, "error": str(exc)})
+                checks.append(
+                    {
+                        "sql_index": index,
+                        "status": "failed",
+                        "count": 0,
+                        "error": str(exc),
+                        "diagnostics": _diagnose_return_check_failure(raw_sql, case_plan),
+                    }
+                )
         permission_checks = _run_permission_checks(cursor, base_cursor, case_plan, qualified_sqls)
     finally:
         try:
@@ -305,10 +316,177 @@ def _load_table_db_mapping() -> dict[str, list[str]]:
 
 
 def _tables_in_select(raw_sql: str) -> set[str]:
+    return {table for table, _alias in _table_references_in_select(raw_sql)}
+
+
+def _diagnose_return_check_failure(raw_sql: str, case_plan: dict) -> dict:
+    tables = sorted(_tables_in_select(raw_sql))
+    table_aliases = _table_aliases_in_select(raw_sql)
+    inserted_values = _inserted_values_by_table(case_plan)
+    predicates = _literal_predicates(raw_sql)
+    checks = []
+    for qualifier, column, query_value in predicates:
+        table = _table_for_predicate_column(tables, table_aliases, inserted_values, qualifier, column)
+        insert_column = inserted_values.get(table, {}).get(column) if table else None
+        insert_value = str(insert_column.get("value") or "") if insert_column else ""
+        source = str(insert_column.get("source") or "") if insert_column else ""
+        if not insert_column:
+            status = "missing_insert_value"
+        elif insert_value == query_value:
+            status = "matched"
+        else:
+            status = "mismatch" if insert_value else "missing_insert_value"
+        checks.append(
+            {
+                "table": table or "",
+                "column": column,
+                "query_value": query_value,
+                "insert_value": insert_value,
+                "status": status,
+                "source": source,
+            }
+        )
     return {
-        _normalize_table_name(match.group(1))
-        for match in re.finditer(r"\b(?:from|join)\s+((?:`[^`]+`|\w+)(?:\s*\.\s*(?:`[^`]+`|\w+))?)", raw_sql, flags=re.IGNORECASE)
+        "tables": tables,
+        "predicate_checks": checks,
+        "summary": _predicate_diagnostic_summary(checks),
     }
+
+
+def _inserted_values_by_table(case_plan: dict) -> dict[str, dict[str, dict]]:
+    result: dict[str, dict[str, dict]] = {}
+    for plan in case_plan.get("insert_plans", []) if isinstance(case_plan.get("insert_plans"), list) else []:
+        if not isinstance(plan, dict):
+            continue
+        table_names = {
+            _normalize_table_name(str(plan.get("table") or "")),
+            _normalize_table_name(str(plan.get("physical_table") or "")),
+        }
+        table_names.discard("")
+        rows = plan.get("rows")
+        columns = rows[0] if isinstance(rows, list) and rows else plan.get("columns", [])
+        if not isinstance(columns, list):
+            continue
+        by_column = {
+            str(column.get("name") or ""): column
+            for column in columns
+            if isinstance(column, dict) and str(column.get("name") or "")
+        }
+        for table in table_names:
+            result.setdefault(table, {}).update(by_column)
+    return result
+
+
+def _literal_predicates(raw_sql: str) -> list[tuple[str, str, str]]:
+    result: list[tuple[str, str, str]] = []
+    for match in re.finditer(
+        r"(?:(\b[A-Za-z_][A-Za-z0-9_]*)\.)?\b([A-Za-z_][A-Za-z0-9_]*)\b\s*=\s*'([^']*)'",
+        raw_sql,
+    ):
+        result.append((match.group(1) or "", match.group(2), match.group(3)))
+    for match in re.finditer(
+        r"(?:(\b[A-Za-z_][A-Za-z0-9_]*)\.)?\b([A-Za-z_][A-Za-z0-9_]*)\b\s*=\s*(\d{4,})",
+        raw_sql,
+    ):
+        result.append((match.group(1) or "", match.group(2), match.group(3)))
+    deduped: list[tuple[str, str, str]] = []
+    for item in result:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def _table_for_predicate_column(
+    tables: list[str],
+    table_aliases: dict[str, str],
+    inserted_values: dict[str, dict[str, dict]],
+    qualifier: str,
+    column: str,
+) -> str:
+    qualified_table = table_aliases.get(str(qualifier or "").lower())
+    if qualified_table:
+        return qualified_table
+    for table in tables:
+        if column in inserted_values.get(table, {}):
+            return table
+    for table, values in inserted_values.items():
+        if column in values:
+            return table
+    return tables[0] if len(tables) == 1 else ""
+
+
+def _table_aliases_in_select(raw_sql: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for table, alias in _table_references_in_select(raw_sql):
+        if not table:
+            continue
+        result[table] = table
+        if alias:
+            result[alias] = table
+    return result
+
+
+def _table_references_in_select(raw_sql: str) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    table_clause = _table_clause_in_select(raw_sql)
+    if not table_clause:
+        return result
+    table_pattern = r"(?P<table>(?:`[^`]+`|\w+)(?:\s*\.\s*(?:`[^`]+`|\w+))?)"
+    alias_pattern = r"(?:\s+(?:as\s+)?(?P<alias>\w+))?"
+    for pattern in (
+        rf"\b(?:from|join)\s+{table_pattern}{alias_pattern}",
+        rf",\s*{table_pattern}{alias_pattern}",
+    ):
+        for match in re.finditer(pattern, table_clause, flags=re.IGNORECASE):
+            table = _normalize_table_name(match.group("table"))
+            alias = str(match.group("alias") or "").strip().lower()
+            if table:
+                result.append((table, alias if alias and not _is_sql_keyword(alias) else ""))
+    return result
+
+
+def _table_clause_in_select(raw_sql: str) -> str:
+    match = re.search(r"\bfrom\b", raw_sql, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    clause = raw_sql[match.start():]
+    end = re.search(r"\b(?:where|group\s+by|order\s+by|having|limit|union)\b", clause, flags=re.IGNORECASE)
+    return clause[: end.start()] if end else clause
+
+
+def _is_sql_keyword(value: str) -> bool:
+    return value.lower() in {
+        "where",
+        "join",
+        "left",
+        "right",
+        "inner",
+        "outer",
+        "full",
+        "cross",
+        "on",
+        "and",
+        "or",
+        "group",
+        "order",
+        "limit",
+    }
+
+
+def _predicate_diagnostic_summary(checks: list[dict]) -> str:
+    parts = []
+    for check in checks:
+        status = check.get("status")
+        if status == "matched":
+            continue
+        column = check.get("column", "")
+        query_value = check.get("query_value", "")
+        insert_value = check.get("insert_value", "")
+        if status == "mismatch":
+            parts.append(f"{column} mismatch query={query_value} insert={insert_value}")
+        elif status == "missing_insert_value":
+            parts.append(f"{column} missing_insert_value query={query_value}")
+    return "; ".join(parts)
 
 
 def _normalize_table_name(raw_table: str) -> str:
