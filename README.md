@@ -270,6 +270,8 @@ SQL 生成优先使用确定性数据：
 - `schema_cache.json` 和 `config/cache/*.json` 中的表结构缓存。
 - 当前菜单真实日志中的 where/join 字段和物理表路由。
 
+步骤 2c 会额外把 SQL 预埋需求写入 `case_plan.sql_requirements`。该字段记录每张表、物理表、关键列、值来源、字段用途和是否允许默认值；当前它只作为诊断和后续改造依据，不改变现有 `InsertPlan` 生成结果。
+
 原则：
 
 - 不依赖环境中随机存在的业务数据。

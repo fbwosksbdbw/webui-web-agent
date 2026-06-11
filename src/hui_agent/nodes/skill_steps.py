@@ -17,6 +17,7 @@ from hui_agent.fill_code import render_pytest_case
 from hui_agent.insert_plan import InsertColumn, InsertPlan, build_insert_plans, load_base_tables, load_schema_cache, render_sql
 from hui_agent.repair_evidence import collect_repair_evidence
 from hui_agent.sql_guards import evaluate_insert_plan_coverage
+from hui_agent.sql_requirements import build_sql_requirements
 from hui_agent.state import HUITestState, STEP_ORDER
 from hui_agent.tools.script_runner import ScriptError, ScriptRunner
 
@@ -468,6 +469,10 @@ class SkillStepHandlers:
                 _write_json(case_plan_path, case_plan)
             case_plan["insert_plans"] = [plan.to_dict() for plan in plans]
             case_plan["insert_plan_skipped"] = skipped
+            case_plan["sql_requirements"] = [
+                requirement.to_dict()
+                for requirement in build_sql_requirements(case_plan, schema_cache=schema_cache)
+            ]
             coverage = evaluate_insert_plan_coverage(case_plan, plans, skipped)
             case_plan["sql_coverage"] = coverage
             self.runner.emit(

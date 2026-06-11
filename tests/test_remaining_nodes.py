@@ -137,6 +137,17 @@ def test_sql_generate_writes_insert_plan_and_sql_files(tmp_path):
     case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
     assert result.completed_steps == ["2c"]
     assert len(case_plan["insert_plans"]) == 2
+    requirements = {item["table"]: item for item in case_plan["sql_requirements"]}
+    assert requirements["tbaccreq"]["role"] == "base"
+    assert requirements["tbaccreq"]["columns"][0] == {
+        "column": "bank_acc",
+        "purpose": "schema_required",
+        "expected_value": "A1",
+        "source": "presets.customer_id",
+        "allow_default": True,
+        "reason": "schema.required_columns",
+    }
+    assert requirements["tbdxtrustshare"]["physical_tables"] == ["tbdxtrustshare16"]
     assert case_plan["sql_paths"] == {
         "base_sql": Path(os.path.relpath(sql_dir / "base.sql", start=case_dir)).as_posix(),
         "preset_sql": Path(os.path.relpath(sql_dir / "preset.sql", start=case_dir)).as_posix(),
