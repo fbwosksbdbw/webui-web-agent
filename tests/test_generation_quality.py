@@ -1843,6 +1843,124 @@ def test_insert_plan_blocks_required_match_columns_from_generated_defaults():
     ]
 
 
+def test_insert_plan_blocks_join_keys_missing_after_propagation():
+    case_plan = {
+        "preset_strategy": {"base_tables": [], "biz_tables": ["left_table", "right_table"]},
+        "shard": {
+            "physical_tables": {
+                "left_table": ["left_table"],
+                "right_table": ["right_table"],
+            }
+        },
+        "sql_requirements": [
+            {
+                "table": "left_table",
+                "physical_tables": ["left_table"],
+                "role": "business",
+                "columns": [
+                    {
+                        "column": "manager_id",
+                        "purpose": "join_key",
+                        "expected_value": "",
+                        "source": "",
+                        "allow_default": False,
+                        "reason": "join_key_columns",
+                    }
+                ],
+                "source_sql": [],
+            },
+            {
+                "table": "right_table",
+                "physical_tables": ["right_table"],
+                "role": "business",
+                "columns": [
+                    {
+                        "column": "manager_id",
+                        "purpose": "join_key",
+                        "expected_value": "",
+                        "source": "",
+                        "allow_default": False,
+                        "reason": "join_key_columns",
+                    }
+                ],
+                "source_sql": [],
+            },
+        ],
+    }
+    schema_cache = {
+        "left_table": {
+            "required_columns": ["manager_id"],
+            "all_columns": ["manager_id"],
+        },
+        "right_table": {
+            "required_columns": ["manager_id"],
+            "all_columns": ["manager_id"],
+        },
+    }
+
+    plans, skipped = build_insert_plans(case_plan, schema_cache=schema_cache, include_skipped=True)
+
+    assert plans == []
+    assert [item["reason"] for item in skipped] == ["missing_join_key_values", "missing_join_key_values"]
+    assert [item["missing_columns"] for item in skipped] == [["manager_id"], ["manager_id"]]
+
+
+def test_insert_plan_blocks_inconsistent_join_key_values():
+    case_plan = {
+        "preset_strategy": {"base_tables": [], "biz_tables": ["left_table", "right_table"]},
+        "shard": {
+            "physical_tables": {
+                "left_table": ["left_table"],
+                "right_table": ["right_table"],
+            }
+        },
+        "sql_requirements": [
+            {
+                "table": "left_table",
+                "physical_tables": ["left_table"],
+                "role": "business",
+                "columns": [
+                    {
+                        "column": "manager_id",
+                        "purpose": "join_key",
+                        "expected_value": "MGR_A",
+                        "source": "base_tables.left_table",
+                        "allow_default": False,
+                        "reason": "join_key_columns",
+                    }
+                ],
+                "source_sql": [],
+            },
+            {
+                "table": "right_table",
+                "physical_tables": ["right_table"],
+                "role": "business",
+                "columns": [
+                    {
+                        "column": "manager_id",
+                        "purpose": "join_key",
+                        "expected_value": "MGR_B",
+                        "source": "base_tables.right_table",
+                        "allow_default": False,
+                        "reason": "join_key_columns",
+                    }
+                ],
+                "source_sql": [],
+            },
+        ],
+    }
+    schema_cache = {
+        "left_table": {"required_columns": ["manager_id"], "all_columns": ["manager_id"]},
+        "right_table": {"required_columns": ["manager_id"], "all_columns": ["manager_id"]},
+    }
+
+    plans, skipped = build_insert_plans(case_plan, schema_cache=schema_cache, include_skipped=True)
+
+    assert plans == []
+    assert [item["reason"] for item in skipped] == ["join_key_value_mismatch", "join_key_value_mismatch"]
+    assert [item["missing_columns"] for item in skipped] == [["manager_id"], ["manager_id"]]
+
+
 def test_insert_plan_uses_semantic_mapping_for_chinese_label_aliases():
     case_plan = {
         "form_fields": {

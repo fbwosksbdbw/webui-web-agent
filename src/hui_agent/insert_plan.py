@@ -134,6 +134,8 @@ def build_insert_plans(
                     )
                 )
                 _remember_join_key_values(value_context, table, physical, effective_columns, join_key_columns)
+    plans, join_skipped = _apply_join_key_consistency(plans, requirement_specs)
+    skipped.extend(join_skipped)
     if include_skipped:
         return plans, skipped
     return plans
@@ -372,6 +374,62 @@ def _missing_blocking_requirement_values(requirements: list[dict[str, Any]], col
         if generated is None or generated.source.startswith("generated."):
             missing.append(name)
     return missing
+
+
+def _apply_join_key_consistency(
+    plans: list[InsertPlan],
+    requirement_specs: dict[str, list[dict[str, Any]]],
+) -> tuple[list[InsertPlan], list[dict[str, Any]]]:
+    join_columns_by_table = _join_requirement_columns_by_table(requirement_specs)
+    if not join_columns_by_table:
+        return plans, []
+    plans_by_table = {_logical_table_name(plan.table): plan for plan in plans}
+    failures: dict[str, tuple[str, list[str]]] = {}
+    values_by_column: dict[str, dict[str, str]] = {}
+    for table, join_columns in join_columns_by_table.items():
+        plan = plans_by_table.get(table)
+        if plan is None:
+            continue
+        row_columns = plan.rows[0] if plan.rows else plan.columns
+        by_name = {column.name: column for column in row_columns}
+        for column in join_columns:
+            generated = by_name.get(column)
+            if generated is None or generated.value == "" or generated.source.startswith("generated."):
+                failures[table] = ("missing_join_key_values", [column])
+                continue
+            values_by_column.setdefault(column, {})[table] = generated.value
+    for column, values_by_table in values_by_column.items():
+        if len(values_by_table) < 2:
+            continue
+        if len(set(values_by_table.values())) <= 1:
+            continue
+        for table in values_by_table:
+            failures[table] = ("join_key_value_mismatch", [column])
+    if not failures:
+        return plans, []
+    filtered_plans = [plan for plan in plans if _logical_table_name(plan.table) not in failures]
+    skipped = []
+    for plan in plans:
+        table = _logical_table_name(plan.table)
+        if table not in failures:
+            continue
+        reason, columns = failures[table]
+        skipped.append(_skip(plan.table, plan.physical_table, plan.role, reason, columns))
+    return filtered_plans, skipped
+
+
+def _join_requirement_columns_by_table(requirement_specs: dict[str, list[dict[str, Any]]]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for table, requirements in requirement_specs.items():
+        for requirement in requirements:
+            if str(requirement.get("purpose") or "") != "join_key":
+                continue
+            if bool(requirement.get("allow_default", True)):
+                continue
+            column = str(requirement.get("column") or "").strip()
+            if column and column not in result.setdefault(table, []):
+                result[table].append(column)
+    return result
 
 
 def _merge_requirement_columns(columns: list[InsertColumn], requirement_columns: list[InsertColumn]) -> list[InsertColumn]:

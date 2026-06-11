@@ -913,12 +913,16 @@ def test_sql_generate_fails_when_any_preset_table_has_no_insert_plan(tmp_path):
         "ui_fund",
     )
 
-    with pytest.raises(Exception, match="SQL coverage gate failed"):
+    with pytest.raises(Exception, match="missing_join_key_values"):
         build_default_step_handlers(skill)["2c"](_state(case_dir))
 
     case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
     assert case_plan["sql_coverage"]["status"] == "failed"
-    assert case_plan["sql_coverage"]["missing_expected_tables"][0]["table"] == "righttable"
+    missing = {item["table"]: item["reason"] for item in case_plan["sql_coverage"]["missing_expected_tables"]}
+    assert missing == {
+        "lefttable": "missing_join_key_values",
+        "righttable": "missing_schema",
+    }
 
 
 def test_sql_generate_fails_when_return_precheck_finds_zero_rows(tmp_path):
