@@ -16,6 +16,28 @@ class InsertColumn:
 
 
 @dataclass(frozen=True)
+class DeleteWhereDiagnostic:
+    quality: str
+    reason: str
+    columns: list[str]
+    risk: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "quality": self.quality,
+            "reason": self.reason,
+            "columns": self.columns,
+            "risk": self.risk,
+        }
+
+
+@dataclass(frozen=True)
+class DeleteWhereSelection:
+    clause: str
+    diagnostic: DeleteWhereDiagnostic
+
+
+@dataclass(frozen=True)
 class InsertPlan:
     table: str
     physical_table: str
@@ -24,6 +46,7 @@ class InsertPlan:
     delete_where: str
     rows: list[list[InsertColumn]] | None = None
     db: str = ""  # 表所属数据库族（如 ui_fund, ui_trust），来自 table_db_mapping.json
+    delete_where_diagnostic: DeleteWhereDiagnostic | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -34,6 +57,8 @@ class InsertPlan:
             "delete_where": self.delete_where,
             "db": self.db,
         }
+        if self.delete_where_diagnostic is not None:
+            payload["delete_where_diagnostic"] = self.delete_where_diagnostic.to_dict()
         if self.rows is not None:
             payload["rows"] = [
                 [column.__dict__ for column in row]
@@ -122,15 +147,17 @@ def build_insert_plans(
                 if not effective_columns:
                     skipped.append(_skip(table, physical, role, "no_mapped_columns", []))
                     continue
+                delete_where = _delete_where_for_rows(rows or [effective_columns], schema, table=table)
                 plans.append(
                     InsertPlan(
                         table=table,
                         physical_table=physical,
                         role=role,
                         columns=effective_columns,
-                        delete_where=_delete_where_for_rows(rows or [effective_columns], schema, table=table),
+                        delete_where=delete_where.clause,
                         rows=rows,
                         db=_resolve_plan_db(table, role, table_db_mapping, routing_db=routing_db),
+                        delete_where_diagnostic=delete_where.diagnostic,
                     )
                 )
                 _remember_join_key_values(value_context, table, physical, effective_columns, join_key_columns)
@@ -1182,51 +1209,70 @@ def _derive_virtual_bank_acc(bank_acc: str) -> str:
     return "V" + value
 
 
-def _delete_where_for_rows(rows: list[list[InsertColumn]], schema: TableSchema | None = None, *, table: str = "") -> str:
+def _delete_where_for_rows(
+    rows: list[list[InsertColumn]],
+    schema: TableSchema | None = None,
+    *,
+    table: str = "",
+) -> DeleteWhereSelection:
     table_clause = _support_table_delete_where(rows[0] if rows else [], table)
     if table_clause:
         return table_clause
     common_clause = _common_delete_where_for_generated_identity_rows(rows, schema)
     if common_clause:
         return common_clause
-    clauses = []
+    selections: list[DeleteWhereSelection] = []
     for row in rows:
-        clause = _delete_where(row, schema)
-        if clause not in clauses:
-            clauses.append(clause)
-    if len(clauses) == 1:
-        return clauses[0]
-    return " OR ".join(f"({clause})" for clause in clauses)
+        selection = _delete_where_selection(row, schema)
+        if selection.clause not in {item.clause for item in selections}:
+            selections.append(selection)
+    if len(selections) == 1:
+        return selections[0]
+    return DeleteWhereSelection(
+        " OR ".join(f"({selection.clause})" for selection in selections),
+        DeleteWhereDiagnostic(
+            quality="multi_row_or",
+            reason="multiple_rows_distinct_delete_where",
+            columns=_dedupe_columns(column for selection in selections for column in selection.diagnostic.columns),
+            risk=_max_delete_risk(selection.diagnostic.risk for selection in selections),
+        ),
+    )
 
 
-def _support_table_delete_where(columns: list[InsertColumn], table: str) -> str:
+def _support_table_delete_where(columns: list[InsertColumn], table: str) -> DeleteWhereSelection | None:
     table_name = _logical_table_name(str(table or "").lower())
     by_name = {column.name: column for column in columns if column.value != ""}
     if table_name == "tbclientseller" and "in_client_no" in by_name:
-        return f"in_client_no = {_quote(by_name['in_client_no'].value)}"
-    if table_name == "tbbankacc" and {"bank_acc", "in_client_no"}.issubset(by_name):
-        return (
-            f"bank_acc = {_quote(by_name['bank_acc'].value)} "
-            f"AND in_client_no = {_quote(by_name['in_client_no'].value)}"
+        return DeleteWhereSelection(
+            f"in_client_no = {_quote(by_name['in_client_no'].value)}",
+            DeleteWhereDiagnostic("support_table_key", "table.tbclientseller", ["in_client_no"], "low"),
         )
-    return ""
+    if table_name == "tbbankacc" and {"bank_acc", "in_client_no"}.issubset(by_name):
+        return DeleteWhereSelection(
+            (
+                f"bank_acc = {_quote(by_name['bank_acc'].value)} "
+                f"AND in_client_no = {_quote(by_name['in_client_no'].value)}"
+            ),
+            DeleteWhereDiagnostic("support_table_key", "table.tbbankacc", ["bank_acc", "in_client_no"], "low"),
+        )
+    return None
 
 
 def _common_delete_where_for_generated_identity_rows(
     rows: list[list[InsertColumn]],
     schema: TableSchema | None,
-) -> str:
+) -> DeleteWhereSelection | None:
     if len(rows) < 2 or schema is None:
-        return ""
+        return None
     identity_columns = _identity_columns(schema)
     if "close_date" not in identity_columns:
-        return ""
+        return None
     row_maps = [{column.name: column for column in row if column.value != ""} for row in rows]
     if not all("close_date" in row for row in row_maps):
-        return ""
+        return None
     close_dates = {row["close_date"].value for row in row_maps}
     if len(close_dates) < 2:
-        return ""
+        return None
     common_columns = [
         column
         for column in identity_columns
@@ -1236,11 +1282,18 @@ def _common_delete_where_for_generated_identity_rows(
     ]
     strong_columns = {"in_client_no", "bank_acc", "account", "ta_code", "bank_no", "prd_code"}
     if not common_columns or not (set(common_columns) & strong_columns):
-        return ""
-    return " AND ".join(f"{column} = {_quote(row_maps[0][column].value)}" for column in common_columns)
+        return None
+    return DeleteWhereSelection(
+        " AND ".join(f"{column} = {_quote(row_maps[0][column].value)}" for column in common_columns),
+        DeleteWhereDiagnostic("common_generated_identity", "shared_identity_columns", common_columns, "low"),
+    )
 
 
 def _delete_where(columns: list[InsertColumn], schema: TableSchema | None = None) -> str:
+    return _delete_where_selection(columns, schema).clause
+
+
+def _delete_where_selection(columns: list[InsertColumn], schema: TableSchema | None = None) -> DeleteWhereSelection:
     """构造 DELETE 的 WHERE 子句，精确定位即将 INSERT 的行。
 
     优先级：
@@ -1251,26 +1304,73 @@ def _delete_where(columns: list[InsertColumn], schema: TableSchema | None = None
     """
     by_name = {column.name: column for column in columns if column.value != ""}
     # 第一优先：主键
-    for key_columns in (schema.primary_keys if schema else [], schema.required_columns if schema else []):
-        if key_columns and all(column in by_name for column in key_columns):
-            return " AND ".join(f"{column} = {_quote(by_name[column].value)}" for column in key_columns)
+    if schema and schema.primary_keys and all(column in by_name for column in schema.primary_keys):
+        return DeleteWhereSelection(
+            " AND ".join(f"{column} = {_quote(by_name[column].value)}" for column in schema.primary_keys),
+            DeleteWhereDiagnostic("primary_key", "schema.primary_keys", schema.primary_keys, "low"),
+        )
+    if schema and schema.required_columns and all(column in by_name for column in schema.required_columns):
+        return DeleteWhereSelection(
+            " AND ".join(f"{column} = {_quote(by_name[column].value)}" for column in schema.required_columns),
+            DeleteWhereDiagnostic("schema_required_key", "schema.required_columns", schema.required_columns, "medium"),
+        )
     # 第二优先：业务主键列
     for preferred in ("bank_acc", "account", "prd_code", "ta_code", "template_code"):
         if preferred in by_name:
-            return f"{preferred} = {_quote(by_name[preferred].value)}"
+            return DeleteWhereSelection(
+                f"{preferred} = {_quote(by_name[preferred].value)}",
+                DeleteWhereDiagnostic("business_key", "preferred_business_column", [preferred], "medium"),
+            )
     # 第三优先：第一个非空值列
     if by_name:
         first = next(iter(by_name.values()))
-        return f"{first.name} = {_quote(first.value)}"
+        return DeleteWhereSelection(
+            f"{first.name} = {_quote(first.value)}",
+            DeleteWhereDiagnostic("single_column_fallback", "first_non_empty_column", [first.name], "high"),
+        )
     # 兜底：所有值均为空字符串（如全 varchar 表且无 context 匹配）
     # 此时用所有列拼接 WHERE（不过滤空值），确保 DELETE 精确匹配即将 INSERT 的数据
     # 避免退化为 WHERE col = '' 误删全表
     all_by_name = {column.name: column for column in columns}
     if schema:
-        for key_columns in (schema.primary_keys, schema.required_columns):
-            if key_columns and all(column in all_by_name for column in key_columns):
-                return " AND ".join(f"{column} = {_quote(all_by_name[column].value)}" for column in key_columns)
-    return " AND ".join(f"{column.name} = {_quote(column.value)}" for column in columns)
+        if schema.primary_keys and all(column in all_by_name for column in schema.primary_keys):
+            return DeleteWhereSelection(
+                " AND ".join(f"{column} = {_quote(all_by_name[column].value)}" for column in schema.primary_keys),
+                DeleteWhereDiagnostic("empty_primary_key", "schema.primary_keys.empty_values", schema.primary_keys, "high"),
+            )
+        if schema.required_columns and all(column in all_by_name for column in schema.required_columns):
+            return DeleteWhereSelection(
+                " AND ".join(f"{column} = {_quote(all_by_name[column].value)}" for column in schema.required_columns),
+                DeleteWhereDiagnostic(
+                    "empty_schema_required_key",
+                    "schema.required_columns.empty_values",
+                    schema.required_columns,
+                    "high",
+                ),
+            )
+    return DeleteWhereSelection(
+        " AND ".join(f"{column.name} = {_quote(column.value)}" for column in columns),
+        DeleteWhereDiagnostic("all_columns_fallback", "all_insert_columns", [column.name for column in columns], "high"),
+    )
+
+
+def _dedupe_columns(values) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value or "")
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _max_delete_risk(values) -> str:
+    rank = {"low": 0, "medium": 1, "high": 2}
+    result = "low"
+    for value in values:
+        text = str(value or "low")
+        if rank.get(text, 0) > rank[result]:
+            result = text
+    return result
 
 
 def _quote(value: str) -> str:

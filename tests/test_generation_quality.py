@@ -501,6 +501,38 @@ def test_insert_plan_delete_where_prefers_schema_required_key_columns():
         "AND bank_no = '000' "
         "AND in_client_no = '33060210021113';"
     ) in render_sql(plans)
+    assert plans[0].delete_where_diagnostic.to_dict() == {
+        "quality": "schema_required_key",
+        "reason": "schema.required_columns",
+        "columns": ["virtual_bank_acc", "bank_no", "in_client_no"],
+        "risk": "medium",
+    }
+
+
+def test_insert_plan_delete_where_diagnostic_flags_single_column_fallback():
+    case_plan = {
+        "presets": {"memo": "UI_AUTO_MEMO"},
+        "preset_strategy": {"base_tables": ["tbdeletewide"], "biz_tables": []},
+        "shard": {"physical_tables": {"tbdeletewide": ["tbdeletewide"]}},
+    }
+    schema_cache = {
+        "tbdeletewide": {
+            "required_columns": [],
+            "all_columns": ["memo", "remark"],
+        },
+    }
+
+    plans, skipped = build_insert_plans(case_plan, schema_cache=schema_cache, include_skipped=True)
+
+    assert skipped == []
+    assert plans[0].delete_where == "memo = 'UI_AUTO_MEMO'"
+    assert plans[0].delete_where_diagnostic.to_dict() == {
+        "quality": "single_column_fallback",
+        "reason": "first_non_empty_column",
+        "columns": ["memo"],
+        "risk": "high",
+    }
+    assert plans[0].to_dict()["delete_where_diagnostic"]["risk"] == "high"
 
 
 def test_permission_rows_do_not_duplicate_identity_when_split_column_is_not_key():
