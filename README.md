@@ -1,5 +1,7 @@
 # HUI Playwright LangGraph Agent 使用手册
 
+webui 自动化 web 端。
+
 HUI Playwright LangGraph Agent 是一个面向 HUI 后台菜单自动化测试生成的 Python CLI 工具。它把原有 HUI Playwright skill 封装成可恢复、可批量、可观测的 LangGraph workflow，用于自动完成菜单探勘、SQL 日志分析、预埋数据生成、pytest 用例生成、验证修复和报告输出。
 
 本项目定位为 **确定性 workflow + 少量 LLM 决策节点**。浏览器、CDP、SSH、数据库、SQL dry-run 和 pytest 均属于高风险执行环节，因此主流程由确定性脚本和状态图控制，LLM 仅用于 SQL 判断、SQL 修复、模板审查和失败诊断等需要推理的场景。
