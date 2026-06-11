@@ -162,7 +162,22 @@ def _sql_literal_constants(raw_sqls: list[str]) -> dict[str, str]:
             flags=re.IGNORECASE,
         ):
             result.setdefault(match.group(1), match.group(2))
+        for match in re.finditer(
+            r"(?:\b[A-Za-z_][A-Za-z0-9_]*\.)?\b([A-Za-z_][A-Za-z0-9_]*)\b\s+in\s*\(([^)]*)\)",
+            hydrated,
+            flags=re.IGNORECASE,
+        ):
+            values = _literal_list_values(match.group(2))
+            if values:
+                result.setdefault(match.group(1), values[0])
     return result
+
+
+def _literal_list_values(text: str) -> list[str]:
+    quoted = [match.group(1) for match in re.finditer(r"'([^']*)'", text)]
+    if quoted:
+        return quoted
+    return [match.group(1) for match in re.finditer(r"(?:^|,)\s*(\d{4,})\s*(?=,|$)", text)]
 
 
 def _hydrate_current_params_sql(raw_sql: str) -> str:

@@ -5,6 +5,7 @@ from pathlib import Path
 from hui_agent.fill_code import render_pytest_case
 from hui_agent.insert_plan import build_insert_plans, load_base_tables, render_sql
 from hui_agent.nodes.skill_steps import build_default_step_handlers
+from hui_agent.sql_requirements import build_sql_requirements
 from hui_agent.state import HUITestState
 
 
@@ -1375,6 +1376,75 @@ def test_fund_frequent_report_insert_plan_generates_subscribe_and_redeem_pairs()
     assert {row["trans_date"] for row in rows} == {"20250610", "20250620"}
     assert [row["open_branch"] for row in rows] == ["0011", "0011", "100", "100"]
     assert len({row["cfm_no"] for row in rows}) == 4
+
+
+def test_fund_frequent_report_query_table_uses_in_literals_for_requirement_gate():
+    case_plan = {
+        "case_count": 7,
+        "case_inputs": {
+            "querymulti": {
+                "fields": [
+                    {"label": "客户标识", "type": "input", "value": "A33060210021113"},
+                    {"label": "开始日期", "type": "input", "value": "2026-01-01"},
+                    {"label": "结束日期", "type": "input", "value": "2026-01-30"},
+                ],
+            }
+        },
+        "presets": {
+            "customer_id": "A33060210021113",
+            "in_client_no": "33060210021113",
+            "ta_code": "WEBUI01",
+            "prd_code": "cycleset01",
+            "branch_no": "0011",
+            "hq_branch_no": "100",
+            "bank_no": "000",
+        },
+        "preset_strategy": {"base_tables": ["tbdxfundtranscfmqry"], "biz_tables": []},
+        "shard": {"physical_tables": {"tbdxfundtranscfmqry": ["tbdxfundtranscfmqry"]}},
+        "log_analysis": {
+            "requirements": {
+                "where_columns": {"tbdxfundtranscfmqry": ["busin_code", "prd_code"]},
+                "raw_sqls": [
+                    "select * from tbdxfundtranscfmqry a,tbdxfundtranscfmqry b "
+                    "where a.in_client_no = b.in_client_no "
+                    "and a.prd_code = b.prd_code "
+                    "and a.busin_code in ('120','122','130','139') "
+                    "and b.busin_code in ('124','142') "
+                    "and a.ta_code='WEBUI01' "
+                    "and a.prd_code='cycleset01'"
+                ],
+            }
+        },
+    }
+    schema_cache = {
+        "tbdxfundtranscfmqry": {
+            "required_columns": ["ta_code", "cfm_date", "cfm_no", "bank_no"],
+            "all_columns": [
+                "ta_code",
+                "cfm_date",
+                "cfm_no",
+                "trans_date",
+                "busin_code",
+                "branch_no",
+                "open_branch",
+                "in_client_no",
+                "client_type",
+                "bank_no",
+                "bank_acc",
+                "prd_code",
+            ],
+        }
+    }
+    case_plan["sql_requirements"] = [
+        requirement.to_dict() for requirement in build_sql_requirements(case_plan, schema_cache=schema_cache)
+    ]
+
+    plans, skipped = build_insert_plans(case_plan, schema_cache=schema_cache, include_skipped=True)
+
+    assert skipped == []
+    assert len(plans[0].rows) == 4
+    rows = [{column.name: column.value for column in row} for row in plans[0].rows]
+    assert [row["busin_code"] for row in rows] == ["120", "124", "120", "124"]
 
 
 def test_business_insert_plan_keeps_execution_sql_unqualified_and_diagnostic_sql_qualified():

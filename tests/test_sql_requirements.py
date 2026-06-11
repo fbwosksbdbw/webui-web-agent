@@ -110,3 +110,34 @@ def test_sql_requirements_can_be_serialized_to_case_plan_shape():
             "source_sql": [],
         }
     ]
+
+
+def test_sql_requirements_use_in_predicate_literals_as_trusted_values():
+    case_plan = {
+        "preset_strategy": {"base_tables": ["tbdxfundtranscfmqry"], "biz_tables": []},
+        "shard": {"physical_tables": {"tbdxfundtranscfmqry": ["tbdxfundtranscfmqry"]}},
+        "log_analysis": {
+            "requirements": {
+                "where_columns": {"tbdxfundtranscfmqry": ["busin_code", "prd_code"]},
+                "raw_sqls": [
+                    "select * from tbdxfundtranscfmqry a,tbdxfundtranscfmqry b "
+                    "where a.busin_code in ('120','122','130','139') "
+                    "and b.busin_code in ('124','142') "
+                    "and a.prd_code='cycleset01'"
+                ],
+            }
+        },
+    }
+    schema_cache = {
+        "tbdxfundtranscfmqry": {
+            "required_columns": [],
+            "all_columns": ["busin_code", "prd_code"],
+        }
+    }
+
+    requirements = build_sql_requirements(case_plan, schema_cache=schema_cache)
+
+    columns = {column.column: column for column in requirements[0].columns}
+    assert columns["busin_code"].expected_value == "120"
+    assert columns["busin_code"].source == "log_analysis.literal.busin_code"
+    assert columns["prd_code"].expected_value == "cycleset01"
