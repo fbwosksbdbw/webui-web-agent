@@ -107,6 +107,12 @@ def test_sql_generate_writes_insert_plan_and_sql_files(tmp_path):
                         "tbdxtrustshare": ["tbdxtrustshare16"],
                     },
                 },
+                "log_analysis": {
+                    "requirements": {
+                        "where_columns": {"tbdxtrustshare": ["custom_filter"]},
+                        "raw_sqls": ["select * from tbdxtrustshare where custom_filter = 'REQ_VALUE'"],
+                    }
+                },
             },
             ensure_ascii=False,
         ),
@@ -126,7 +132,7 @@ def test_sql_generate_writes_insert_plan_and_sql_files(tmp_path):
             },
             "tbdxtrustshare16": {
                 "required_columns": ["bank_acc", "ta_code"],
-                "all_columns": ["bank_acc", "ta_code"],
+                "all_columns": ["bank_acc", "ta_code", "custom_filter"],
             },
         },
         "ui_trust",
@@ -153,7 +159,10 @@ def test_sql_generate_writes_insert_plan_and_sql_files(tmp_path):
         "preset_sql": Path(os.path.relpath(sql_dir / "preset.sql", start=case_dir)).as_posix(),
     }
     assert "INSERT INTO tbaccreq" in (sql_dir / "base.sql").read_text(encoding="utf-8")
-    assert "INSERT INTO tbdxtrustshare16" in (sql_dir / "preset.sql").read_text(encoding="utf-8")
+    preset_sql = (sql_dir / "preset.sql").read_text(encoding="utf-8")
+    assert "INSERT INTO tbdxtrustshare16" in preset_sql
+    assert "custom_filter" in preset_sql
+    assert "'REQ_VALUE'" in preset_sql
 
 
 def test_sql_generate_uses_llm_permission_decision_to_enable_branch_cases(tmp_path):

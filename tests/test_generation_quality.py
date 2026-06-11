@@ -1705,6 +1705,99 @@ def test_agent_base_tables_include_trust_market_required_reference_records():
         assert annualized[column] != ""
 
 
+def test_insert_plan_consumes_sql_requirements_for_query_match_columns():
+    case_plan = {
+        "preset_strategy": {"base_tables": [], "biz_tables": ["biztable"]},
+        "shard": {"physical_tables": {"biztable": ["biztable"]}},
+        "sql_requirements": [
+            {
+                "table": "biztable",
+                "physical_tables": ["biztable"],
+                "role": "business",
+                "columns": [
+                    {
+                        "column": "custom_filter",
+                        "purpose": "required_match",
+                        "expected_value": "REQ_VALUE",
+                        "source": "log_analysis.literal.custom_filter",
+                        "allow_default": False,
+                        "reason": "where_columns",
+                    }
+                ],
+                "source_sql": [],
+            }
+        ],
+    }
+    schema_cache = {
+        "biztable": {
+            "required_columns": ["id"],
+            "all_columns": ["id", "custom_filter"],
+        }
+    }
+
+    plans, skipped = build_insert_plans(case_plan, schema_cache=schema_cache, include_skipped=True)
+
+    assert skipped == []
+    values = {column.name: column for column in plans[0].columns}
+    assert values["custom_filter"].value == "REQ_VALUE"
+    assert values["custom_filter"].source == "sql_requirements.required_match.log_analysis.literal.custom_filter"
+
+
+def test_insert_plan_requirement_values_override_base_template_values():
+    case_plan = {
+        "presets": {"prd_code": "P1"},
+        "preset_strategy": {"base_tables": ["product_table"], "biz_tables": []},
+        "shard": {"physical_tables": {"product_table": ["product_table"]}},
+        "sql_requirements": [
+            {
+                "table": "product_table",
+                "physical_tables": ["product_table"],
+                "role": "base",
+                "columns": [
+                    {
+                        "column": "prd_type",
+                        "purpose": "required_match",
+                        "expected_value": "0",
+                        "source": "log_analysis.literal.prd_type",
+                        "allow_default": False,
+                        "reason": "where_columns",
+                    }
+                ],
+                "source_sql": [],
+            }
+        ],
+    }
+    schema_cache = {
+        "product_table": {
+            "required_columns": ["prd_code", "prd_type"],
+            "all_columns": ["prd_code", "prd_type"],
+        }
+    }
+    base_tables = {
+        "product_table": {
+            "records": {
+                "default": {
+                    "prd_code": "P1",
+                    "prd_type": "8",
+                }
+            }
+        }
+    }
+
+    plans, skipped = build_insert_plans(
+        case_plan,
+        schema_cache=schema_cache,
+        base_tables=base_tables,
+        include_skipped=True,
+    )
+
+    assert skipped == []
+    values = {column.name: column for column in plans[0].columns}
+    assert values["prd_code"].value == "P1"
+    assert values["prd_type"].value == "0"
+    assert values["prd_type"].source == "sql_requirements.required_match.log_analysis.literal.prd_type"
+
+
 def test_insert_plan_uses_semantic_mapping_for_chinese_label_aliases():
     case_plan = {
         "form_fields": {

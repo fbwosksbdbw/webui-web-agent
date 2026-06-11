@@ -449,6 +449,10 @@ class SkillStepHandlers:
             schema_cache = load_schema_cache(self.runner.skill_root)
             base_tables = load_base_tables(self.runner.skill_root)
             table_db_mapping = _load_table_db_mapping(self.runner.skill_root)
+            case_plan["sql_requirements"] = [
+                requirement.to_dict()
+                for requirement in build_sql_requirements(case_plan, schema_cache=schema_cache)
+            ]
             plans, skipped = build_insert_plans(
                 case_plan,
                 schema_cache=schema_cache,
@@ -459,6 +463,10 @@ class SkillStepHandlers:
             if _has_missing_schema(skipped):
                 _refresh_schema_cache_for_missing_tables(self.runner, case_plan, config, skipped)
                 schema_cache = load_schema_cache(self.runner.skill_root)
+                case_plan["sql_requirements"] = [
+                    requirement.to_dict()
+                    for requirement in build_sql_requirements(case_plan, schema_cache=schema_cache)
+                ]
                 plans, skipped = build_insert_plans(
                     case_plan,
                     schema_cache=schema_cache,
@@ -469,10 +477,6 @@ class SkillStepHandlers:
                 _write_json(case_plan_path, case_plan)
             case_plan["insert_plans"] = [plan.to_dict() for plan in plans]
             case_plan["insert_plan_skipped"] = skipped
-            case_plan["sql_requirements"] = [
-                requirement.to_dict()
-                for requirement in build_sql_requirements(case_plan, schema_cache=schema_cache)
-            ]
             coverage = evaluate_insert_plan_coverage(case_plan, plans, skipped)
             case_plan["sql_coverage"] = coverage
             self.runner.emit(

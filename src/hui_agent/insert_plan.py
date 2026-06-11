@@ -79,6 +79,7 @@ def build_insert_plans(
     routing_db = str(shard.get("routing_db") or shard.get("db") or "")
     value_context = _build_value_context(case_plan)
     join_key_columns = _join_key_columns(case_plan)
+    requirement_columns = _requirement_columns_by_table(case_plan)
     plans: list[InsertPlan] = []
     skipped: list[dict[str, Any]] = []
     promoted_base_tables = _promoted_no_insert_base_tables(case_plan, schema_cache)
@@ -97,7 +98,7 @@ def build_insert_plans(
                 if schema is None:
                     skipped.append(_skip(table, physical, role, "missing_schema", []))
                     continue
-                columns = _columns_for_table(table, schema, value_context, base_tables or {})
+                columns = _columns_for_table(table, schema, value_context, base_tables or {}, requirement_columns.get(_logical_table_name(table), []))
                 rows = _tbclientmap_bank_no_variant_rows(table, schema, columns)
                 if rows is None and _has_permission_cases(case_plan):
                     rows = _permission_rows(table, schema, columns, value_context)
@@ -299,11 +300,59 @@ def _extract_column_list(value: Any) -> list[str]:
     return result
 
 
+def _requirement_columns_by_table(case_plan: dict[str, Any]) -> dict[str, list[InsertColumn]]:
+    result: dict[str, list[InsertColumn]] = {}
+    for requirement in case_plan.get("sql_requirements", []) if isinstance(case_plan.get("sql_requirements"), list) else []:
+        if not isinstance(requirement, dict):
+            continue
+        table = _logical_table_name(str(requirement.get("table") or ""))
+        if not table:
+            continue
+        for column in requirement.get("columns", []) if isinstance(requirement.get("columns"), list) else []:
+            if not isinstance(column, dict):
+                continue
+            name = str(column.get("column") or "").strip()
+            value = str(column.get("expected_value") or "")
+            if not name or value == "":
+                continue
+            purpose = str(column.get("purpose") or "requirement")
+            source = str(column.get("source") or "")
+            result.setdefault(table, []).append(
+                InsertColumn(
+                    name=name,
+                    value=value,
+                    source="sql_requirements." + purpose + (f".{source}" if source else ""),
+                )
+            )
+    return result
+
+
+def _merge_requirement_columns(columns: list[InsertColumn], requirement_columns: list[InsertColumn]) -> list[InsertColumn]:
+    if not requirement_columns:
+        return columns
+    by_name = {column.name: column for column in requirement_columns}
+    result: list[InsertColumn] = []
+    included: set[str] = set()
+    for column in columns:
+        replacement = by_name.get(column.name)
+        if replacement:
+            result.append(replacement)
+            included.add(column.name)
+        else:
+            result.append(column)
+            included.add(column.name)
+    for column in requirement_columns:
+        if column.name not in included:
+            result.append(column)
+    return result
+
+
 def _columns_for_table(
     table: str,
     schema: TableSchema,
     value_context: dict[str, tuple[str, str]],
     base_tables: dict[str, Any],
+    requirement_columns: list[InsertColumn] | None = None,
 ) -> list[InsertColumn]:
     template_columns = _columns_from_base_template(table, schema, value_context, base_tables)
     if template_columns:
@@ -311,16 +360,20 @@ def _columns_for_table(
         # 确保 INSERT 覆盖 schema 中所有列，避免遗漏字段导致其他查询失败
         return _apply_table_semantic_defaults(
             table,
-            _merge_with_schema_defaults(template_columns, schema),
+            _merge_requirement_columns(_merge_with_schema_defaults(template_columns, schema), requirement_columns or []),
             value_context,
         )
     if _is_product_table(table):
         return _apply_table_semantic_defaults(
             table,
-            _merge_with_schema_defaults(_columns_from_context(schema, value_context), schema),
+            _merge_requirement_columns(_merge_with_schema_defaults(_columns_from_context(schema, value_context), schema), requirement_columns or []),
             value_context,
         )
-    return _apply_table_semantic_defaults(table, _columns_from_context(schema, value_context), value_context)
+    return _apply_table_semantic_defaults(
+        table,
+        _merge_requirement_columns(_columns_from_context(schema, value_context), requirement_columns or []),
+        value_context,
+    )
 
 
 def _apply_table_semantic_defaults(
