@@ -140,7 +140,9 @@ python "{SKILL_DIR}/scripts/config_reader.py" sql "{菜单名}"    # 生成SQL�
 
 ## 预埋数据预设值（presets）
 
-| 配置键 | 说明 | 默认值 |
+Excel「预埋数据」sheet 只维护 `字段名`、`默认值`、`说明`、`适用模块`。用户不需要在 Excel 中维护英文 key 或数据库列名；系统通过 `knowledge/config/field_semantics.json` 将中文字段名映射为内部语义键，再映射到 SQL 生成需要的数据库列。
+
+| 内部语义键 | 说明 | 默认值 |
 |--------|------|--------|
 | ta_code_1 | 主TA代码 | JS |
 | ta_option_1 | 主TA下拉框选项 | JS:嘉实基金 |
@@ -158,7 +160,7 @@ python "{SKILL_DIR}/scripts/config_reader.py" sql "{菜单名}"    # 生成SQL�
 | branch_no | 分行机构编号 | 0011 |
 | branch_name | 分行机构名称 | 交通银行股份有限公司0011分行 |
 
-**⚠️ 预埋数据必须从配置读取，严禁硬编码！** 生成SQL和用例代码时用 `presets.xxx` 替换。
+**⚠️ 预埋数据必须从配置读取，严禁在代码里硬编码业务值！** 生成 SQL 和用例代码时读取 `presets`；`presets` 的内部语义键由 `field_semantics.json` 从 Excel 中文字段名推导。
 
 ### 预埋字段匹配规则（form_fields.all value + value_source）
 
@@ -167,7 +169,7 @@ python "{SKILL_DIR}/scripts/config_reader.py" sql "{菜单名}"    # 生成SQL�
 - 字段名包含 label（如 label="TA" 匹配字段名="TA代码1"）
 - 优先匹配最长字段名（如「客户标识类型」优先于「客户标识」）
 
-**无需维护静态映射表**，`config_reader.py` 的 `match_presets()` 方法直接读取 Excel 字段名列进行匹配。新增预埋字段时只需在 Excel 中添加一行，代码自动生效。
+表单值匹配只依赖 Excel 的中文字段名；SQL 生成所需的内部语义和数据库列名映射由 `field_semantics.json` 维护。新增预埋字段时，如果它只是新的业务值，可只在 Excel 中添加一行；如果它对应新的语义或数据库列，还需要同步补充 `field_semantics.json`。
 
 所有字段统一通过 `generate_field_values()` 获得值：
 - `preset`: 匹配到 Excel 预埋数据

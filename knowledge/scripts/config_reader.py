@@ -21,6 +21,7 @@ from skill_config import resolve_env
 # 配置文件默认路径（相对于skill根目录）
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG_PATH = os.path.join(SKILL_DIR, 'config', 'test_config.xlsx')
+FIELD_SEMANTICS_PATH = os.path.join(SKILL_DIR, 'config', 'field_semantics.json')
 
 # 模块英文标识 → Excel「适用模块」列中文名
 _MODULE_EN_TO_CN = {
@@ -31,6 +32,42 @@ _MODULE_EN_TO_CN = {
     'per': '个人养老金',
     'pension': '个人养老金',
 }
+
+
+def _load_field_semantics() -> dict:
+    try:
+        with open(FIELD_SEMANTICS_PATH, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _semantic_key_for_label(label: str) -> str:
+    mapping = _load_field_semantics().get('label_to_semantic', {})
+    if not isinstance(mapping, dict):
+        return ''
+    label_text = str(label or '').strip()
+    if not label_text:
+        return ''
+    if label_text in mapping:
+        return str(mapping[label_text] or '').strip()
+    for candidate, semantic in sorted(mapping.items(), key=lambda item: len(str(item[0])), reverse=True):
+        candidate_text = str(candidate or '').strip()
+        if candidate_text and (candidate_text in label_text or label_text in candidate_text):
+            return str(semantic or '').strip()
+    return ''
+
+
+def _header_index(headers: list, name: str) -> int:
+    return headers.index(name) if name in headers else -1
+
+
+def _row_value(row: tuple, headers: list, name: str):
+    index = _header_index(headers, name)
+    if index < 0 or index >= len(row):
+        return None
+    return row[index]
 
 
 def _normalize_in_client_no(*candidates) -> str:
@@ -180,35 +217,43 @@ class ConfigReader:
         """预埋数据，按模块过滤。module 为英文标识(dxfund/dxtrust/fina/dxcp)，为空时返回全部。"""
         ws = self._wb['预埋数据']
         headers = [cell.value for cell in ws[1]]
-        module_idx = headers.index('适用模块') if '适用模块' in headers else -1
+        module_idx = _header_index(headers, '适用模块')
         module_cn = module_to_chinese(module)
         result = {}
         for row in ws.iter_rows(min_row=2, values_only=True):
-            if row[1] and row[2]:
-                if module and module_idx >= 0:
-                    row_module = str(row[module_idx] or '').strip()
-                    if row_module and row_module not in ('公共', '所有菜单', module_cn):
-                        continue
-                result[row[1]] = str(row[2])
+            label = _row_value(row, headers, '字段名')
+            value = _row_value(row, headers, '默认值')
+            if not label or value is None or str(value).strip() == '':
+                continue
+            if module and module_idx >= 0:
+                row_module = str(row[module_idx] or '').strip()
+                if row_module and row_module not in ('公共', '所有菜单', module_cn):
+                    continue
+            key = _row_value(row, headers, '字段键') or _semantic_key_for_label(str(label)) or str(label)
+            result[str(key)] = str(value)
         return result
 
     def get_preset_fields(self, module: str = '') -> dict:
         """预埋数据完整信息，按模块过滤。module 为英文标识。"""
         ws = self._wb['预埋数据']
         headers = [cell.value for cell in ws[1]]
-        module_idx = headers.index('适用模块') if '适用模块' in headers else -1
+        module_idx = _header_index(headers, '适用模块')
         module_cn = module_to_chinese(module)
         result = {}
         for row in ws.iter_rows(min_row=2, values_only=True):
-            if row[1] and row[2]:
-                if module and module_idx >= 0:
-                    row_module = str(row[module_idx] or '').strip()
-                    if row_module and row_module not in ('公共', '所有菜单', module_cn):
-                        continue
-                result[row[1]] = {
-                    'name': str(row[0]) if row[0] else '',
-                    'value': str(row[2]),
-                }
+            label = _row_value(row, headers, '字段名')
+            value = _row_value(row, headers, '默认值')
+            if not label or value is None or str(value).strip() == '':
+                continue
+            if module and module_idx >= 0:
+                row_module = str(row[module_idx] or '').strip()
+                if row_module and row_module not in ('公共', '所有菜单', module_cn):
+                    continue
+            key = _row_value(row, headers, '字段键') or _semantic_key_for_label(str(label)) or str(label)
+            result[str(key)] = {
+                'name': str(label),
+                'value': str(value),
+            }
         return result
 
     # ========== 菜单 URL 缓存（menu_urls.json，独立于 Excel） ==========

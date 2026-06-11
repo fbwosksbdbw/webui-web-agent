@@ -3,6 +3,8 @@ import sys
 import types
 from pathlib import Path
 
+from openpyxl import Workbook
+
 
 def _load_config_reader_module():
     scripts_dir = Path(__file__).parents[1] / "knowledge" / "scripts"
@@ -130,3 +132,34 @@ def test_compute_shard_falls_back_to_config_in_client_no_when_db_mapping_is_blan
     assert result["in_client_no"] == "33060210021113"
     assert result["last8"] == "10021113"
     assert result["db_name"] == "ui_trust2"
+
+
+def test_presets_can_be_derived_from_chinese_fields_without_field_key_column(tmp_path):
+    module = _load_config_reader_module()
+    workbook = Workbook()
+    env = workbook.active
+    env.title = "环境配置"
+    env.append(["配置项", "配置值", "说明"])
+    env.append(["module", "dxtrust", ""])
+    menus = workbook.create_sheet("菜单导入")
+    menus.append(["状态", "菜单名称"])
+    presets = workbook.create_sheet("预埋数据")
+    presets.append(["字段名", "默认值", "说明", "适用模块"])
+    presets.append(["客户标识", "A33060210021113", "统一客户标识", "公共"])
+    presets.append(["TA代码", "HT", "TA代码", "信托代销"])
+    presets.append(["产品代码", "UI_HT_P001", "产品信息查询用产品代码", "信托代销"])
+    presets.append(["产品代码", "cycleset01", "产品信息查询用产品代码", "基金代销"])
+    config_path = tmp_path / "test_config.xlsx"
+    workbook.save(config_path)
+
+    reader = module.ConfigReader(config_path)
+
+    assert reader.get_presets("dxtrust") == {
+        "customer_id": "A33060210021113",
+        "ta_code": "HT",
+        "prd_code": "UI_HT_P001",
+    }
+    assert reader.get_preset_fields("dxtrust")["customer_id"] == {
+        "name": "客户标识",
+        "value": "A33060210021113",
+    }

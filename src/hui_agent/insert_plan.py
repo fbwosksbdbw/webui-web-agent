@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,16 @@ BRANCH_PERMISSION_COLUMNS = (
     "open_org",
 )
 INTERNAL_PERMISSION_COLUMNS = ("internal_branch",)
+
+
+@lru_cache(maxsize=1)
+def _load_field_semantics() -> dict[str, Any]:
+    path = Path(__file__).resolve().parents[2] / "knowledge" / "config" / "field_semantics.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def build_insert_plans(
@@ -812,6 +823,8 @@ def _build_value_context(case_plan: dict[str, Any]) -> dict[str, tuple[str, str]
     presets = case_plan.get("presets", {})
     for key, value in presets.items():
         _put_context(context, str(key), _clean_value(value), f"presets.{key}")
+        for column in _columns_for_semantic(str(key)):
+            _put_context(context, column, _clean_value(value), f"presets.{key}")
     for column, value in _sql_literal_constants(case_plan).items():
         _put_context(context, column, value, f"log_analysis.literal.{column}")
     for field in case_plan.get("form_fields", {}).get("all", []):
@@ -963,47 +976,41 @@ def _normalize_context_value_for_column(column: str, value: str) -> str:
 
 
 def _label_to_columns(label: str) -> list[str]:
-    if "冻结流水号" in label:
-        return ["frozen_serial"]
-    if "解冻流水号" in label:
-        return ["unfrozen_serial"]
-    if "冻结解冻状态" in label:
-        return ["frozen_status"]
-    if "冻结日期" in label:
-        columns = ["frozen_date"]
-        if "开始" in label or "起始" in label:
+    semantics = _load_field_semantics()
+    label_to_semantic = semantics.get("label_to_semantic", {})
+    label_text = str(label or "").strip()
+    columns: list[str] = []
+    semantic = ""
+    if isinstance(label_to_semantic, dict) and label_text:
+        if label_text in label_to_semantic:
+            semantic = str(label_to_semantic[label_text] or "")
+        else:
+            for candidate, candidate_semantic in sorted(label_to_semantic.items(), key=lambda item: len(str(item[0])), reverse=True):
+                candidate_text = str(candidate or "").strip()
+                if candidate_text and (candidate_text in label_text or label_text in candidate_text):
+                    semantic = str(candidate_semantic or "")
+                    break
+    for column in _columns_for_semantic(semantic):
+        if column not in columns:
+            columns.append(column)
+    if "开始" in label_text or "起始" in label_text:
+        if "query_date_start" not in columns:
             columns.append("query_date_start")
-        if "结束" in label or "截止" in label:
+    if "结束" in label_text or "截止" in label_text or "终止" in label_text:
+        if "query_date_end" not in columns:
             columns.append("query_date_end")
-        return columns
-    if "确认日期" in label:
-        columns = ["cfm_date"]
-        if "开始" in label or "起始" in label:
-            columns.append("query_date_start")
-        if "结束" in label or "截止" in label:
-            columns.append("query_date_end")
-        return columns
-    if "冻结原因" in label:
-        return ["frozen_cause"]
-    if "交易代码" in label:
-        return ["trans_code"]
-    if "系统流水号" in label:
-        return ["serial_no", "global_serial_no"]
-    if "开始日期" in label or "起始日期" in label:
-        return ["query_date_start"]
-    if "结束日期" in label or "截止日期" in label:
-        return ["query_date_end"]
-    if "客户标识" in label and "类型" not in label:
-        return ["bank_acc", "account"]
-    if "账号" in label and "类型" not in label:
-        return ["bank_acc", "account", "ta_client"]
-    if "TA" in label:
-        return ["ta_code"]
-    if "产品代码" in label:
-        return ["prd_code"]
-    if "产品名称" in label:
-        return ["prd_name"]
-    return []
+    return columns
+
+
+def _columns_for_semantic(semantic: str) -> list[str]:
+    semantics = _load_field_semantics()
+    semantic_to_columns = semantics.get("semantic_to_columns", {})
+    if not isinstance(semantic_to_columns, dict):
+        return []
+    columns = semantic_to_columns.get(str(semantic or ""))
+    if not isinstance(columns, list):
+        return []
+    return [str(column) for column in columns if str(column or "").strip()]
 
 
 def _derive_virtual_bank_acc(bank_acc: str) -> str:

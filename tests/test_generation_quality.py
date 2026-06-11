@@ -1703,3 +1703,29 @@ def test_agent_base_tables_include_trust_market_required_reference_records():
         assert daily[column] != ""
     for column in ("bank_no", "ta_code", "prd_code", "iss_date"):
         assert annualized[column] != ""
+
+
+def test_insert_plan_uses_semantic_mapping_for_chinese_label_aliases():
+    case_plan = {
+        "form_fields": {
+            "all": [
+                {"label": "客户编号", "type": "input", "value": "A33060210021113"},
+            ]
+        },
+        "preset_strategy": {"base_tables": [], "biz_tables": ["biztable"]},
+        "shard": {"physical_tables": {"biztable": ["biztable"]}},
+    }
+    schema_cache = {
+        "biztable": {
+            "required_columns": ["bank_acc"],
+            "all_columns": ["bank_acc", "account"],
+        }
+    }
+
+    plans, skipped = build_insert_plans(case_plan, schema_cache=schema_cache, include_skipped=True)
+
+    assert skipped == []
+    values = {column.name: column for column in plans[0].columns}
+    assert values["bank_acc"].value == "A33060210021113"
+    assert values["bank_acc"].source == "form_fields.客户编号"
+    assert values["account"].value == "A33060210021113"
