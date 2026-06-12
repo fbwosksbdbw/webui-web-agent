@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -227,3 +228,119 @@ def test_init_menu_prefers_excel_env_key_for_single_db_environment(tmp_path):
     assert result["env_key"] == "gyyh-auto"
     assert result["env"]["single_db_key"] == "GYYHAUTO"
     assert result["env"]["db_type"] == "oracle"
+
+
+def test_menu_url_matches_when_new_env_menu_name_drops_business_prefix(tmp_path):
+    module = _load_config_reader_module()
+    workbook = Workbook()
+    env = workbook.active
+    env.title = "环境配置"
+    env.append(["配置项", "配置值", "说明"])
+    menus = workbook.create_sheet("菜单导入")
+    menus.append(["状态", "菜单名称", "导航一级菜单", "导航二级菜单", "导航三级菜单"])
+    menus.append(["未完成", "基金代销频繁交易报表", "基金代销", "报表管理", "基金代销频繁交易报表"])
+    presets = workbook.create_sheet("预埋数据")
+    presets.append(["字段名", "默认值", "说明", "适用模块"])
+    config_path = tmp_path / "test_config.xlsx"
+    workbook.save(config_path)
+    (tmp_path / "menu_urls.json").write_text(
+        json.dumps([
+            {
+                "menu_code": "ifmCDyglPfjy",
+                "menu_name": "频繁交易报表",
+                "tree_idx": "ifmCDygl#ifmCDyglMonitor#ifmCDyglMonitorFxjk#ifmCDyglPfjy#",
+            }
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    reader = module.ConfigReader(config_path)
+
+    assert reader.get_menu_url("基金代销频繁交易报表") == "ifmCDygl#ifmCDyglMonitor#ifmCDyglMonitorFxjk#ifmCDyglPfjy#"
+    assert reader.get_func_code("基金代销频繁交易报表") == "ifmCDyglPfjy"
+
+
+def test_menu_url_prefers_leaf_when_parent_and_leaf_share_name(tmp_path):
+    module = _load_config_reader_module()
+    workbook = Workbook()
+    env = workbook.active
+    env.title = "环境配置"
+    env.append(["配置项", "配置值", "说明"])
+    menus = workbook.create_sheet("菜单导入")
+    menus.append(["状态", "菜单名称", "导航一级菜单", "导航二级菜单", "导航三级菜单"])
+    menus.append(["未完成", "产品信息查询", "理财代销", "查询管理", "产品信息查询"])
+    presets = workbook.create_sheet("预埋数据")
+    presets.append(["字段名", "默认值", "说明", "适用模块"])
+    config_path = tmp_path / "test_config.xlsx"
+    workbook.save(config_path)
+    (tmp_path / "menu_urls.json").write_text(
+        json.dumps([
+            {
+                "menu_code": "ifmCCxglPrdInfo",
+                "menu_name": "产品信息查询",
+                "tree_idx": "ifmquerymanage#ifmCCxglPrdInfo#",
+            },
+            {
+                "menu_code": "ifmCCxglProductDetail",
+                "menu_name": "产品信息查询",
+                "tree_idx": "ifmquerymanage#ifmCCxglPrdInfo#ifmCCxglProductDetail#",
+            },
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    reader = module.ConfigReader(config_path)
+
+    assert reader.get_menu_url("产品信息查询") == "ifmquerymanage#ifmCCxglPrdInfo#ifmCCxglProductDetail#"
+
+
+def test_init_query_manage_menu_uses_navigation_hierarchy_without_losing_business_path(tmp_path):
+    module = _load_config_reader_module()
+    project = tmp_path / "project"
+    (project / "conf").mkdir(parents=True)
+    (project / "conf" / "__init__.py").write_text("", encoding="utf-8")
+    (project / "conf" / "config.py").write_text(
+        "class Config:\n"
+        "    TEST_CASE_DIRS = {'理财代销': 'tests_out'}\n"
+        "    env_dbs = {}\n",
+        encoding="utf-8",
+    )
+
+    workbook = Workbook()
+    env = workbook.active
+    env.title = "环境配置"
+    env.append(["配置项", "配置值", "说明"])
+    env.append(["project_dir", str(project), ""])
+    env.append(["env_key", "gyyh-auto", ""])
+    env.append(["single_db_key", "GYYHAUTO", ""])
+    env.append(["db_type", "oracle", ""])
+    env.append(["log_path_module_keywords", "基金:dxfund,信托:dxtrust,理财:fina", ""])
+    menus = workbook.create_sheet("菜单导入")
+    menus.append(["状态", "菜单名称", "导航一级菜单", "导航二级菜单", "导航三级菜单"])
+    menus.append(["未完成", "客户份额查询", "查询管理", "份额查询", "客户份额查询"])
+    presets = workbook.create_sheet("预埋数据")
+    presets.append(["字段名", "默认值", "说明", "适用模块"])
+    presets.append(["客户标识", "A33060210021113", "", "公共"])
+    config_path = tmp_path / "test_config.xlsx"
+    workbook.save(config_path)
+    (tmp_path / "menu_urls.json").write_text(
+        json.dumps([
+            {
+                "menu_code": "ifmCCxglShareinfoquery",
+                "menu_name": "客户份额查询",
+                "tree_idx": "ifmquerymanage#ifmCCxglShareinfo#ifmCCxglShareinfoquery#",
+            }
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    sys.modules.pop("conf.config", None)
+    sys.modules.pop("conf", None)
+
+    reader = module.ConfigReader(config_path)
+
+    result = reader.init_menu("客户份额查询")
+
+    assert result["menu"]["导航一级菜单"] == "查询管理"
+    assert result["menu"]["导航二级菜单"] == "份额查询"
+    assert result["module"] == "fina"
+    assert result["paths"]["test_case_dir"].endswith("tests_out")

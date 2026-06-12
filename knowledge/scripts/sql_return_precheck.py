@@ -37,13 +37,39 @@ SYSTEM_SELECT_TABLES = {
     "tbsysarg",
     "tbtrans",
 }
+_single_db_key_cache = None
+
+
+def _configured_single_db_key() -> str:
+    global _single_db_key_cache
+    if _single_db_key_cache is not None:
+        return _single_db_key_cache
+    _single_db_key_cache = ""
+    try:
+        from openpyxl import load_workbook
+
+        xlsx_path = SCRIPT_DIR.parent / "config" / "test_config.xlsx"
+        if not xlsx_path.exists():
+            return _single_db_key_cache
+        wb = load_workbook(xlsx_path, data_only=True)
+        try:
+            ws = wb["环境配置"]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row and row[0] == "single_db_key" and row[1]:
+                    _single_db_key_cache = str(row[1]).strip()
+                    break
+        finally:
+            wb.close()
+    except Exception:
+        _single_db_key_cache = ""
+    return _single_db_key_cache
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SQL return-row precheck")
     parser.add_argument("--case-plan", required=True, help="case_plan.json path")
     parser.add_argument("--config", required=True, help="config.json path")
-    parser.add_argument("--db", default="ui_bc", help="database key for backend SELECT")
+    parser.add_argument("--db", default=_configured_single_db_key() or "ui_bc", help="database key for backend SELECT")
     parser.add_argument("--env", help="override env key")
     parser.add_argument("--json", action="store_true", help="print JSON result")
     args = parser.parse_args()
@@ -295,14 +321,15 @@ def _public_precheck_tables(case_plan: dict) -> set[str]:
     for table in strategy.get("no_insert_tables", []):
         normalized = _normalize_table_name(str(table))
         dbs = mapping.get(normalized, [])
-        if dbs and set(dbs) <= {"ui_bc"}:
+        legacy_db_families = [db for db in dbs if str(db).lower().startswith("ui_")]
+        if legacy_db_families and set(legacy_db_families) <= {"ui_bc"}:
             public_tables.add(normalized)
     return {table for table in public_tables if table}
 
 
 def _is_single_db_case(case_plan: dict) -> bool:
     env = case_plan.get("env", {}) if isinstance(case_plan.get("env"), dict) else {}
-    return bool(str(env.get("single_db_key") or case_plan.get("single_db_key") or "").strip())
+    return bool(str(env.get("single_db_key") or case_plan.get("single_db_key") or _configured_single_db_key()).strip())
 
 
 def _load_table_db_mapping() -> dict[str, list[str]]:

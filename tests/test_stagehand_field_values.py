@@ -12,12 +12,9 @@ def _load_explore_wrapper(path: Path):
 
 def _wrapper_paths():
     repo_root = Path(__file__).resolve().parents[1]
-    candidates = [
+    return [
         repo_root / "knowledge" / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
-        repo_root.parent / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
-        repo_root.parent / "hui-playwright-agent" / "knowledge" / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
     ]
-    return [path for path in candidates if path.exists()]
 
 
 def test_select_preset_wins_when_explored_options_are_stale():
@@ -39,6 +36,54 @@ def test_select_preset_wins_when_explored_options_are_stale():
         field = result["all"][0]
         assert field["value"] == "UI_HT_P001:UI自动化HT信托产品"
         assert field["value_source"] == "preset"
+
+
+def test_generate_field_values_fills_inputs_and_selects_without_presets():
+    for path in _wrapper_paths():
+        wrapper = _load_explore_wrapper(path)
+
+        result = wrapper.generate_field_values(
+            [
+                {"label": "客户姓名", "type": "input", "is_required": False, "options": []},
+                {"label": "账户类型", "type": "single-select", "is_required": False, "options": []},
+            ],
+            {},
+        )
+
+        by_label = {field["label"]: field for field in result["all"]}
+
+        assert by_label["客户姓名"]["value"]
+        assert by_label["客户姓名"]["value_source"] == "generated"
+        assert by_label["账户类型"]["value"] == "__FIRST_OPTION__"
+        assert by_label["账户类型"]["value_source"] == "first_option"
+
+
+def test_generate_field_values_matches_spaced_account_and_account_type_presets():
+    for path in _wrapper_paths():
+        wrapper = _load_explore_wrapper(path)
+
+        result = wrapper.generate_field_values(
+            [
+                {"label": "账    号", "type": "input", "is_required": False, "options": []},
+                {"label": "账户类型", "type": "single-select", "is_required": False, "options": []},
+                {"label": "份额所属机构", "type": "single-select", "is_required": False, "options": []},
+            ],
+            {
+                "account": {"name": "账号", "value": "A33060210021113"},
+                "account_type": {"name": "账户类型", "value": "0:入账账号"},
+                "branch_no": {"name": "分行机构编号", "value": "0001"},
+                "hq_branch_no": {"name": "总行机构编号", "value": "100"},
+            },
+        )
+
+        by_label = {field["label"]: field for field in result["all"]}
+
+        assert by_label["账    号"]["value"] == "A33060210021113"
+        assert by_label["账    号"]["value_source"] == "preset"
+        assert by_label["账户类型"]["value"] == "0:入账账号"
+        assert by_label["账户类型"]["value_source"] == "preset"
+        assert by_label["份额所属机构"]["value"] == "0001"
+        assert by_label["份额所属机构"]["value_source"] == "preset"
 
 
 def test_stagehand_explorer_invokes_locator_first_method():

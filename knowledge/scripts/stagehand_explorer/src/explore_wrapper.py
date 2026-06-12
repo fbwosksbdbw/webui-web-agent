@@ -322,6 +322,7 @@ def fix_date_types(fields: List[dict]) -> List[dict]:
 
 def _match_preset_value(label: str, preset_fields: dict) -> str:
     """Fuzzy match a form label to preset_fields, returning the preset value or ''."""
+    normalized_label = ''.join(str(label or '').split())
     best_match_len = 0
     best_value = ''
     best_exact = False
@@ -329,7 +330,8 @@ def _match_preset_value(label: str, preset_fields: dict) -> str:
         field_name = info.get('name', '') if isinstance(info, dict) else ''
         if not field_name:
             continue
-        if label == field_name:
+        normalized_field_name = ''.join(str(field_name or '').split())
+        if label == field_name or (normalized_label and normalized_label == normalized_field_name):
             if not best_exact or len(field_name) > best_match_len:
                 best_value = info.get('value', '') if isinstance(info, dict) else ''
                 best_exact = True
@@ -337,7 +339,10 @@ def _match_preset_value(label: str, preset_fields: dict) -> str:
             continue
         if best_exact:
             continue
-        if field_name in label or label in field_name:
+        if field_name in label or label in field_name or (
+            normalized_field_name and normalized_label
+            and (normalized_field_name in normalized_label or normalized_label in normalized_field_name)
+        ):
             if len(field_name) > best_match_len:
                 best_value = info.get('value', '') if isinstance(info, dict) else ''
                 best_match_len = len(field_name)
@@ -453,6 +458,17 @@ def generate_field_values(
             required.append(label)
 
         preset_value = _match_preset_value(label, preset_fields)
+        if not preset_value and label.replace(' ', '') == '账户类型':
+            for preset_key in ('account_type', 'customer_id_type'):
+                account_type_info = preset_fields.get(preset_key, {}) if isinstance(preset_fields, dict) else {}
+                if isinstance(account_type_info, dict) and account_type_info.get('value'):
+                    preset_value = str(account_type_info.get('value') or '')
+                    break
+        if not preset_value and '机构' in label:
+            branch_key = 'hq_branch_no' if '总行' in label else 'branch_no'
+            branch_info = preset_fields.get(branch_key, {}) if isinstance(preset_fields, dict) else {}
+            if isinstance(branch_info, dict):
+                preset_value = str(branch_info.get('value', '') or '')
 
         if ftype in ('single-select', 'multi-select'):
             # ─── 下拉框 ───

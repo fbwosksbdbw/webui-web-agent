@@ -248,6 +248,33 @@ _TABLE_DB_RULES = [
     # 兜底规则：仅当 table_db_mapping.json 中查不到时使用
     ('tsys_', '', 'ui_bc'),
 ]
+_single_db_key_cache = None
+
+
+def _configured_single_db_key() -> str:
+    """Return the configured single database key, if the current project uses one DB."""
+    global _single_db_key_cache
+    if _single_db_key_cache is not None:
+        return _single_db_key_cache
+    _single_db_key_cache = ''
+    try:
+        from openpyxl import load_workbook
+
+        xlsx_path = os.path.join(SKILL_DIR, 'config', 'test_config.xlsx')
+        if not os.path.exists(xlsx_path):
+            return _single_db_key_cache
+        wb = load_workbook(xlsx_path, data_only=True)
+        try:
+            ws = wb['环境配置']
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row and row[0] == 'single_db_key' and row[1]:
+                    _single_db_key_cache = str(row[1]).strip()
+                    break
+        finally:
+            wb.close()
+    except Exception:
+        _single_db_key_cache = ''
+    return _single_db_key_cache
 
 
 def table_to_db(table_name: str) -> str:
@@ -260,6 +287,10 @@ def table_to_db(table_name: str) -> str:
     当表同时存在于 ui_bc 和业务库时，优先返回业务库（更具体的库族）。
     如需获取所有库族，使用 table_to_dbs()。
     """
+    single_db_key = _configured_single_db_key()
+    if single_db_key:
+        return single_db_key
+
     t = table_name.lower()
 
     # 第一优先：映射文件（值为列表，优先返回非 ui_bc 的业务库族）
@@ -291,6 +322,10 @@ def table_to_dbs(table_name: str) -> list:
     优先查 table_db_mapping.json，未命中则降级到 _TABLE_DB_RULES，
     都不匹配返回 ['ui_bc']。
     """
+    single_db_key = _configured_single_db_key()
+    if single_db_key:
+        return [single_db_key]
+
     t = table_name.lower()
 
     # 第一优先：映射文件（值为列表）
@@ -323,6 +358,10 @@ def resolve_shard_db(table_name: str, routing_db: str = None) -> str:
     注意：一个表可能属于多个库族。此函数返回单个库族（向后兼容）。
     如需获取所有库族，使用 resolve_shard_dbs()。
     """
+    single_db_key = _configured_single_db_key()
+    if single_db_key:
+        return single_db_key
+
     # 🔧 修复：先归一化表名（如 tbdxfundshare13 → tbdxfundshare），再查映射
     normalized = normalize_table_name(table_name)
     family = table_to_db(normalized)
@@ -341,6 +380,10 @@ def resolve_shard_dbs(table_name: str, routing_db: str = None) -> list:
     一个表可能同时存在于多个库（如 ui_bc 和 ui_trust），此函数返回所有库族。
     用于 SQL 预埋时为每个库都生成 INSERT 语句。
     """
+    single_db_key = _configured_single_db_key()
+    if single_db_key:
+        return [single_db_key]
+
     # 🔧 修复：先归一化表名（如 tbdxfundshare13 → tbdxfundshare），再查映射
     normalized = normalize_table_name(table_name)
     families = table_to_dbs(normalized)
@@ -1741,6 +1784,10 @@ def load_schema_cache(module: str = None) -> dict:
         if family:
             return load_db_cache(family)
         return _load_module_cache(module)
+    single_db_key = _configured_single_db_key()
+    if single_db_key:
+        return load_db_cache(single_db_key)
+
     merged = {}
     # 新方式：按库族加载
     for family in _DB_FAMILY_CACHE_FILES:

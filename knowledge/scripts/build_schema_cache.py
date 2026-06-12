@@ -65,10 +65,12 @@ def _find_project_root(project_dir: str = None) -> str:
 
 from sql_extractor import (
     load_schema_cache, save_schema_cache,
-    seed_cache_from_describe, filter_describe_result,
+    filter_describe_result,
     _load_module_cache, load_table_db_mapping, save_table_db_mapping,
-    load_db_cache, _DB_FAMILY_CACHE_FILES,
+    load_db_cache, _save_db_family_cache, _DB_FAMILY_CACHE_FILES,
 )
+
+_ORACLE_CLIENT_INITIALIZED = False
 
 # 常用表清单（配置表 + 业务表）
 DEFAULT_TABLES = {
@@ -149,6 +151,7 @@ def _connect_configured_db(common: dict, db_cfg: dict, db_name: str):
         except ImportError:
             raise ImportError("请安装 oracledb: pip install oracledb")
 
+        _init_oracle_client_if_available(oracledb, common, db_cfg)
         database = db_cfg.get('database', db_name)
         dsn = db_cfg.get('dsn') or f"{common['host']}:{common.get('port', 1521)}/{database}"
         conn = oracledb.connect(
@@ -172,6 +175,44 @@ def _connect_configured_db(common: dict, db_cfg: dict, db_name: str):
     )
     _set_connection_db_type(conn, db_type)
     return conn
+
+
+def _init_oracle_client_if_available(oracledb, common: dict, db_cfg: dict) -> None:
+    global _ORACLE_CLIENT_INITIALIZED
+    if _ORACLE_CLIENT_INITIALIZED or not hasattr(oracledb, 'init_oracle_client'):
+        return
+
+    lib_dir = _oracle_client_lib_dir(common, db_cfg)
+    if not lib_dir:
+        return
+
+    try:
+        oracledb.init_oracle_client(lib_dir=lib_dir)
+        _ORACLE_CLIENT_INITIALIZED = True
+    except Exception as exc:
+        message = str(exc).lower()
+        if 'already initialized' in message or 'dpy-2017' in message:
+            _ORACLE_CLIENT_INITIALIZED = True
+            return
+        raise
+
+
+def _oracle_client_lib_dir(common: dict, db_cfg: dict) -> str:
+    for source in (db_cfg, common):
+        for key in ('oracle_client_lib_dir', 'instant_client_dir', 'client_lib_dir', 'lib_dir'):
+            value = str(source.get(key) or '').strip()
+            if value:
+                return value
+
+    for env_key in ('ORACLE_CLIENT_LIB_DIR', 'ORACLE_INSTANT_CLIENT_DIR'):
+        value = str(os.environ.get(env_key) or '').strip()
+        if value:
+            return value
+
+    for path_item in os.environ.get('PATH', '').split(os.pathsep):
+        if path_item and os.path.exists(os.path.join(path_item, 'oci.dll')):
+            return path_item
+    return ''
 
 
 def _set_connection_db_type(conn, db_type: str) -> None:
@@ -357,6 +398,11 @@ def _db_family(db_name: str) -> str:
     return re.sub(r'\d+$', '', db_name)
 
 
+def _is_single_db_family(db_name: str) -> bool:
+    family = _db_family(db_name)
+    return bool(family) and not family.lower().startswith('ui_')
+
+
 def _ensure_table_db_mapping(table_name: str, db_name: str) -> None:
     table = _base_table_name(_cache_identifier(table_name))
     family = _db_family(db_name)
@@ -364,6 +410,12 @@ def _ensure_table_db_mapping(table_name: str, db_name: str) -> None:
         return
 
     mapping = load_table_db_mapping(force_reload=False)
+    if _is_single_db_family(db_name):
+        if mapping.get(table) != [family]:
+            mapping[table] = [family]
+            save_table_db_mapping(mapping)
+        return
+
     existing = mapping.get(table)
     if existing is None:
         mapping[table] = [family]
@@ -378,6 +430,29 @@ def _ensure_table_db_mapping(table_name: str, db_name: str) -> None:
         save_table_db_mapping(mapping)
 
 
+def _seed_cache_from_describe_for_db(table_name: str, describe_rows: list, db_name: str, unique_indexes: list = None) -> dict:
+    """用 DESCRIBE 结果写入当前 DB 对应的缓存文件。"""
+    from datetime import date
+
+    table = _cache_identifier(table_name)
+    family = _db_family(db_name)
+    filtered = filter_describe_result(describe_rows)
+    entry = {
+        "required_columns": filtered["required_columns"],
+        "all_columns": filtered["all_columns"] or filtered["required_columns"],
+        "cached_at": str(date.today()),
+    }
+    if unique_indexes:
+        entry["unique_indexes"] = unique_indexes
+    if filtered.get("column_types"):
+        entry["column_types"] = filtered["column_types"]
+
+    cache = load_db_cache(family)
+    cache[table] = entry
+    _save_db_family_cache(family, cache)
+    return filtered
+
+
 def build_table_db_mapping(db_names: list = None, env_key: str = None):
     """从数据库 SHOW TABLES 构建表→库族映射并写入 JSON。
 
@@ -390,7 +465,8 @@ def build_table_db_mapping(db_names: list = None, env_key: str = None):
     if db_names is None:
         db_names = list(DEFAULT_TABLES.keys())
 
-    mapping = load_table_db_mapping(force_reload=True)
+    replace_mapping = len(db_names) == 1 and _is_single_db_family(db_names[0])
+    mapping = {} if replace_mapping else load_table_db_mapping(force_reload=True)
     new_count = 0
     append_count = 0
 
@@ -406,7 +482,12 @@ def build_table_db_mapping(db_names: list = None, env_key: str = None):
 
         for table in tables:
             base = _base_table_name(table)
-            if base not in mapping:
+            if replace_mapping:
+                if base not in mapping:
+                    mapping[base] = [family]
+                    new_count += 1
+                    print(f"  {base} → {family}")
+            elif base not in mapping:
                 # 新表：创建列表
                 mapping[base] = [family]
                 new_count += 1
@@ -448,6 +529,7 @@ def build_cache(tables_by_db: dict = None, clear: bool = False, auto_discover: b
 
     total_added = 0
     total_skipped = 0
+    touched_families = set()
 
     for db_name, tables in tables_by_db.items():
         print(f"\n=== 数据库: {db_name} ===")
@@ -455,6 +537,7 @@ def build_cache(tables_by_db: dict = None, clear: bool = False, auto_discover: b
         if not conn:
             print(f"  跳过（连接失败）")
             continue
+        touched_families.add(_db_family(db_name))
 
         # 自动发现模式：从数据库中查找匹配前缀的表
         if auto_discover:
@@ -482,6 +565,10 @@ def build_cache(tables_by_db: dict = None, clear: bool = False, auto_discover: b
                 discovered = discover_tables_by_prefix(conn, prefixes)
                 print(f"  自动发现 {len(discovered)} 个表（前缀: {prefixes}）")
                 tables = discovered
+            elif _connection_db_type(conn) == 'oracle' or db_name.upper() == db_name:
+                discovered = discover_all_tables(conn)
+                print(f"  自动发现 {len(discovered)} 个表（单库全量）")
+                tables = discovered
 
         for table in tables:
             _ensure_table_db_mapping(table, db_name)
@@ -493,7 +580,7 @@ def build_cache(tables_by_db: dict = None, clear: bool = False, auto_discover: b
             try:
                 rows = describe_table(conn, table)
                 unique_indexes = describe_unique_indexes(conn, table)
-                result = seed_cache_from_describe(table, rows, unique_indexes=unique_indexes)
+                result = _seed_cache_from_describe_for_db(table, rows, db_name, unique_indexes=unique_indexes)
                 print(f"  {table}: {len(result['required_columns'])} 必填列, {len(result['all_columns'])} 总列")
                 total_added += 1
             except Exception as e:
@@ -503,7 +590,9 @@ def build_cache(tables_by_db: dict = None, clear: bool = False, auto_discover: b
 
     print(f"\n完成：新增 {total_added} 表，跳过 {total_skipped} 表")
     # 显示各库族缓存统计
-    for family in _DB_FAMILY_CACHE_FILES:
+    report_families = list(_DB_FAMILY_CACHE_FILES)
+    report_families.extend(sorted(family for family in touched_families if family not in _DB_FAMILY_CACHE_FILES))
+    for family in report_families:
         cache = load_db_cache(family)
         if cache:
             print(f"  {family}: {len(cache)} 表")
@@ -550,7 +639,7 @@ def main():
             print(f"  数据库来源: Excel db_mapping_dbs ({len(dbs_to_discover)} 个)")
         # 先建映射（--auto 默认连带更新）
         print("=== 构建表→库映射 ===")
-        build_table_db_mapping(dbs_to_discover)  # 不传 env_key，自动搜所有环境
+        build_table_db_mapping(dbs_to_discover, env_key=args.env_key)
         tables_by_db = {db: [] for db in dbs_to_discover}
         build_cache(tables_by_db, clear=args.clear, auto_discover=True, force=args.force, env_key=args.env_key)
     elif args.tables:
@@ -559,7 +648,7 @@ def main():
     elif args.build_mapping:
         dbs = args.dbs if args.dbs else _read_db_mapping_dbs_from_excel() or list(DEFAULT_TABLES.keys())
         print(f"=== 构建表→库映射（{len(dbs)} 个数据库）===")
-        build_table_db_mapping(dbs)  # 不传 env_key，自动搜所有环境
+        build_table_db_mapping(dbs, env_key=args.env_key)
     else:
         build_cache(clear=args.clear, env_key=args.env_key)
 

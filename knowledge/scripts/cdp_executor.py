@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import sys
+import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────
 
 _JS_TO_PY_METHODS = {
+    "frameLocator": "frame_locator",
     "getByRole": "get_by_role",
     "getByText": "get_by_text",
     "getByLabel": "get_by_label",
@@ -127,6 +129,7 @@ def translate_locator(page: Page, js_locator_str: str) -> Locator:
                 break
         translated.append(part)
     expr = ".".join(translated).rstrip(";").strip()
+    expr = re.sub(r"\.first\(\)", ".first", expr)
 
     # JS object { key: 'value' } → Python kwargs key='value' in method args
     # e.g. get_by_role('button', { name: '重置' }) → get_by_role('button', name='重置')
@@ -136,6 +139,27 @@ def translate_locator(page: Page, js_locator_str: str) -> Locator:
     ), expr)
 
     logger.debug(f"Locator 翻译: {js_locator_str} → {expr}")
+    frame_match = re.match(r"page\.frame_locator\((['\"])(.*?)\1\)(\..*)$", expr)
+    if frame_match:
+        frame_selector = frame_match.group(2).replace('\\"', '"').replace("\\'", "'")
+        remainder = frame_match.group(3)
+        name_match = re.search(r"iframe\[name=[\"']([^\"']+)[\"']\]", frame_selector)
+        id_match = re.search(r"iframe#([A-Za-z0-9_\-:.]+)", frame_selector)
+        frame = None
+        frames = getattr(page, "frames", [])
+        if name_match and frames:
+            frame_name = name_match.group(1)
+            frame = next((item for item in frames if item.name == frame_name), None)
+        if frame is None and id_match and frames:
+            frame_id = id_match.group(1)
+            frame = next((item for item in frames if item.name == frame_id), None)
+        if frame is not None:
+            frame_expr = f"frame{remainder}"
+            try:
+                return eval(frame_expr, {"__builtins__": {}}, {"frame": frame})
+            except Exception as e:
+                raise SyntaxError(f"frame 定位执行失败: {frame_expr}\n原始: {js_locator_str}\n错误: {e}")
+
     try:
         return eval(expr, {"__builtins__": {}}, {"page": page})
     except Exception as e:
@@ -153,7 +177,14 @@ def connect_cdp(
 ) -> tuple:
     """CDP 直连已运行的 Chrome。只 disconnect()，绝不 close()。"""
     pw = sync_playwright().start()
-    browser = pw.chromium.connect_over_cdp(cdp_url, timeout=timeout)
+    try:
+        browser = pw.chromium.connect_over_cdp(cdp_url, timeout=timeout)
+    except Exception:
+        ws_url = _resolve_cdp_websocket_url(cdp_url)
+        if not ws_url or ws_url == cdp_url:
+            pw.stop()
+            raise
+        browser = pw.chromium.connect_over_cdp(ws_url, timeout=timeout)
     contexts = browser.contexts
     if not contexts:
         raise RuntimeError(f"CDP 连接成功但无上下文: {cdp_url}")
@@ -172,6 +203,18 @@ def connect_cdp(
     return pw, browser, pages[-1]
 
 
+def _resolve_cdp_websocket_url(cdp_url: str) -> str:
+    if not cdp_url or cdp_url.startswith('ws://') or cdp_url.startswith('wss://'):
+        return cdp_url
+    base = cdp_url.rstrip('/')
+    try:
+        with urllib.request.urlopen(f'{base}/json/version', timeout=5) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+    except Exception:
+        return cdp_url
+    return payload.get('webSocketDebuggerUrl') or cdp_url
+
+
 # ─────────────────────────────────────────────────────────────
 #  3. 框架对齐的 HiUI 组件交互层
 #     选择器模式与 common/helpers.py 完全一致
@@ -183,6 +226,12 @@ _DROPDOWN_SELECTORS = [
     ".h-select-dropdown .h-option",
     "ul.h-select-dropdown li",
     ".h-select-dropdown-list li",
+]
+
+_EXT_DROPDOWN_SELECTORS = [
+    ".x-combo-list-item",
+    ".x-boundlist-item",
+    ".x-list-plain li",
 ]
 
 
@@ -796,9 +845,32 @@ class CDPExecutor:
         js_loc = field.get("locator", "")
         if not js_loc:
             raise ValueError(f"字段 '{label}' 无 locator 定义")
+        ext_locator = self._resolve_ext_frame_locator(js_loc)
+        if ext_locator is not None:
+            self._locator_cache[label] = ext_locator
+            return ext_locator
         locator = translate_locator(self.page, js_loc)
         self._locator_cache[label] = locator
         return locator
+
+    def _resolve_ext_frame_locator(self, js_loc: str) -> Optional[Locator]:
+        frame_match = re.search(r"frameLocator\((['\"])(.*?)\1\)", js_loc)
+        label_match = re.search(r"hasText\s*:\s*(['\"])(.*?)\1", js_loc)
+        if not frame_match or not label_match or ".x-form-item" not in js_loc:
+            return None
+        frame_selector = frame_match.group(2).replace('\\"', '"').replace("\\'", "'")
+        name_match = re.search(r"iframe\[name=[\"']([^\"']+)[\"']\]", frame_selector)
+        frame_name = name_match.group(1) if name_match else ""
+        if not frame_name:
+            return None
+        frame = next((item for item in self.page.frames if item.name == frame_name), None)
+        if frame is None:
+            return None
+        label_text = label_match.group(2)
+        locator = frame.locator(".x-form-item").filter(has_text=label_text)
+        if "textarea" in js_loc:
+            return locator.locator('input:not([type="hidden"]), textarea').first
+        return locator.locator('input:not([type="hidden"])').first
 
     # ── 业务动作（框架模式优先）──
 
@@ -1034,11 +1106,189 @@ class CDPExecutor:
         if _select_dropdown_by_label(self.page, label, option):
             return option
 
+        actual = self._select_stagehand_dropdown_option(label, option)
+        if actual:
+            return actual
+
         # 匹配失败：关闭已打开的下拉框，选第一个可见选项兜底
         logger.error(f"[ERROR] {label}: 未找到明确选项 '{option}'，不再回退选第一个")
         self.page.keyboard.press("Escape")
         self.page.wait_for_timeout(300)
         raise ValueError(f"下拉框 {label} 未找到选项: {option}")
+
+    def _visible_dropdown_options(self) -> List[Locator]:
+        options = []
+        for context in self._frame_contexts():
+            for selector in [*_DROPDOWN_SELECTORS, *_EXT_DROPDOWN_SELECTORS]:
+                try:
+                    locator = context.locator(selector)
+                    for index in range(locator.count()):
+                        option = locator.nth(index)
+                        try:
+                            text = (option.text_content(timeout=500) or "").strip()
+                            if not text or _is_dropdown_pagination_text(text):
+                                continue
+                            if option.is_visible(timeout=500):
+                                options.append(option)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        return options
+
+    def _select_stagehand_dropdown_option(self, label: str, option: str) -> Optional[str]:
+        """Use the explored locator to open HUI/Ext dropdowns, then select an option."""
+        try:
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(200)
+            field = self.get_field(label) or {}
+            opened = False
+            js_loc = field.get("locator", "")
+            ext_item = self._resolve_ext_form_item(js_loc)
+            if ext_item is not None:
+                trigger = ext_item.locator(".x-form-trigger, .x-form-arrow-trigger").first
+                if trigger.count() > 0:
+                    trigger_class = trigger.get_attribute("class") or ""
+                    if "x-form-search-trigger" in trigger_class:
+                        return self._select_ext_tree_window(label, ext_item, option)
+                    try:
+                        trigger.click(timeout=3000)
+                    except Exception:
+                        trigger.click(force=True)
+                    opened = True
+            if not opened:
+                locator = self.resolve_locator(label)
+                try:
+                    locator.click(timeout=3000)
+                except Exception:
+                    locator.click(force=True)
+            self.page.wait_for_timeout(700)
+        except Exception as exc:
+            logger.warning(f"Stagehand 无法打开 '{label}' 下拉框: {exc}")
+            return None
+
+        candidates = self._visible_dropdown_options()
+        if not candidates:
+            logger.warning(f"Stagehand 已点击 '{label}'，但未发现可见下拉选项")
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(300)
+            return None
+
+        target = None
+        target_text = ""
+        if _allow_first_option_fallback(option):
+            target = candidates[0]
+            target_text = (target.text_content(timeout=1000) or "").strip()
+        else:
+            for candidate in candidates:
+                text = (candidate.text_content(timeout=1000) or "").strip()
+                if _dropdown_option_matches(option, text):
+                    target = candidate
+                    target_text = text
+                    break
+
+        if target is None:
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(300)
+            return None
+
+        try:
+            target.click(timeout=3000)
+        except Exception:
+            target.click(force=True)
+        self.page.wait_for_timeout(500)
+        logger.info(f"[OK] {label}: Stagehand 下拉选中 '{target_text}'")
+        return target_text
+
+    def _select_ext_tree_window(self, label: str, ext_item: Locator, option: str) -> Optional[str]:
+        """Select a value from old Ext search-trigger tree windows."""
+        trigger = ext_item.locator(".x-form-trigger, .x-form-search-trigger").first
+        try:
+            trigger.click(timeout=3000)
+        except Exception:
+            trigger.click(force=True)
+        self.page.wait_for_timeout(1000)
+
+        windows = []
+        for context in self._frame_contexts():
+            try:
+                locator = context.locator(".x-window:visible")
+                for index in range(locator.count()):
+                    window = locator.nth(index)
+                    if window.locator(".x-tree-node").count() > 0:
+                        windows.append(window)
+            except Exception:
+                continue
+        if not windows:
+            logger.warning(f"{label}: 搜索触发器已点击，但未发现 Ext 树窗口")
+            return None
+
+        window = windows[-1]
+        nodes = window.locator(".x-tree-node")
+        selected_node = None
+        selected_text = ""
+        keyword = str(option or "").split(":", 1)[0].strip()
+        sentinel = _allow_first_option_fallback(option) or keyword.startswith("AUTO_")
+
+        preferred = []
+        fallback = []
+        for index in range(nodes.count()):
+            node = nodes.nth(index)
+            try:
+                text = (node.text_content(timeout=1000) or "").strip()
+            except Exception:
+                continue
+            if not text:
+                continue
+            fallback.append((node, text))
+            if re.search(r"\d+\s*[:：]", text):
+                preferred.append((node, text))
+            if not sentinel and keyword and keyword in text:
+                selected_node = node
+                selected_text = text
+                break
+
+        if selected_node is None:
+            pool = preferred or fallback
+            if pool:
+                selected_node, selected_text = pool[-1]
+
+        if selected_node is None:
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(300)
+            return None
+
+        try:
+            selected_node.click(timeout=3000)
+        except Exception:
+            selected_node.click(force=True)
+        self.page.wait_for_timeout(300)
+
+        ok = window.locator("button:has-text('确'), .x-btn:has-text('确')").first
+        if ok.count() > 0:
+            try:
+                ok.click(timeout=3000)
+            except Exception:
+                ok.click(force=True)
+        else:
+            self.page.keyboard.press("Enter")
+        self.page.wait_for_timeout(700)
+        logger.info(f"[OK] {label}: Ext 树窗口选中 '{selected_text}'")
+        return selected_text
+
+    def _resolve_ext_form_item(self, js_loc: str) -> Optional[Locator]:
+        frame_match = re.search(r"frameLocator\((['\"])(.*?)\1\)", js_loc or "")
+        label_match = re.search(r"hasText\s*:\s*(['\"])(.*?)\1", js_loc or "")
+        if not frame_match or not label_match or ".x-form-item" not in (js_loc or ""):
+            return None
+        frame_selector = frame_match.group(2).replace('\\"', '"').replace("\\'", "'")
+        name_match = re.search(r"iframe\[name=[\"']([^\"']+)[\"']\]", frame_selector)
+        if not name_match:
+            return None
+        frame = next((item for item in self.page.frames if item.name == name_match.group(1)), None)
+        if frame is None:
+            return None
+        return frame.locator(".x-form-item").filter(has_text=label_match.group(2)).first
 
     def _select_first_option(self, label: str) -> str:
         """打开下拉框并选中第一个可见选项。返回选中的选项文本。
@@ -1088,24 +1338,9 @@ class CDPExecutor:
 
         # 策略 2: Stagehand locator 回退
         logger.info(f"框架模式无法打开 '{label}' 下拉框，尝试 Stagehand locator")
-        locator = None
-        try:
-            locator = self.resolve_locator(label)
-            try:
-                locator.click(timeout=3000)
-            except Exception:
-                locator.click(force=True)
-        except Exception:
-            logger.warning(f"Stagehand 也无法定位 '{label}'")
-            locator = None
-
-        if locator is not None:
-            self.page.wait_for_timeout(500)
-            first_text = _get_first_option_in_dropdown(self.page)
-            if first_text:
-                if _find_option_in_dropdown(self.page, first_text):
-                    logger.info(f"[OK] {label}: Stagehand 选中第一个选项 '{first_text}'")
-                    return first_text
+        actual = self._select_stagehand_dropdown_option(label, "__FIRST_OPTION__")
+        if actual:
+            return actual
 
         # 最终重试：关闭弹窗 + 刷新后重试
         logger.info(f"'{label}' 下拉框选择失败，关闭弹窗后重试")
@@ -1146,29 +1381,108 @@ class CDPExecutor:
         self.page.mouse.click(cx, cy)
         self.page.wait_for_timeout(300)
 
+    @staticmethod
+    def _is_legacy_tree_idx(menu_url: str) -> bool:
+        text = str(menu_url or '').strip()
+        return '#' in text and not text.startswith(('http://', 'https://', '/'))
+
+    def _frame_contexts(self):
+        contexts = [self.page]
+        try:
+            contexts.extend(frame for frame in self.page.frames if frame not in contexts)
+        except Exception:
+            pass
+        return contexts
+
+    def _click_legacy_menu_code(self, code: str) -> bool:
+        """Click an old Ext tree/top-menu node by menu code or icon class."""
+        if not code:
+            return False
+
+        # Top navigation buttons are usually rendered as plain DOM ids.
+        try:
+            top = self.page.locator(f"#{code}").first
+            if top.count() > 0:
+                top.click(timeout=3000)
+                self.page.wait_for_timeout(800)
+                return True
+        except Exception:
+            pass
+
+        js = """
+        (code) => {
+            const hasIconClass = (el) => Array.from(el.classList || []).some(cls => cls === `icon_${code}`);
+            const byId = document.getElementById(code);
+            const byIcon = Array.from(document.querySelectorAll('[class]')).find(hasIconClass);
+            const target = byId || byIcon;
+            if (!target) return false;
+            const node = target.closest('.x-tree-node-el, .x-tree-node, li, tr, div') || target;
+            const clickable = node.querySelector('a, button, .x-tree-node-anchor, span') || node;
+            clickable.click();
+            return true;
+        }
+        """
+        for context in self._frame_contexts():
+            try:
+                if context.evaluate(js, code):
+                    self.page.wait_for_timeout(800)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _navigate_legacy_tree(self, menu_url: str):
+        parts = [part for part in str(menu_url or '').strip('#').split('#') if part]
+        if not parts:
+            raise RuntimeError(f"无效的老框架菜单路径: {menu_url}")
+
+        top_code = parts[0]
+        if not self._click_legacy_menu_code(top_code):
+            raise RuntimeError(f"老框架导航失败：未找到顶层菜单 {top_code}")
+
+        for code in parts[1:-1]:
+            self._click_legacy_menu_code(code)
+
+        leaf_code = parts[-1]
+        if not self._click_legacy_menu_code(leaf_code):
+            raise RuntimeError(f"老框架导航失败：未找到叶子菜单 {leaf_code}")
+
+        self.page.wait_for_timeout(3000)
+        logger.info(f"[OK] 老框架树导航到: #{menu_url}")
+
+    def _has_expected_navigation_content(self) -> bool:
+        selectors = ('.h-form-item', '.h-page', 'table', '.x-form-item', '.x-grid3')
+        for context in self._frame_contexts():
+            for selector in selectors:
+                try:
+                    if context.locator(selector).count() > 0:
+                        return True
+                except Exception:
+                    continue
+        return False
+
     def navigate(self, menu_url: str, verify: bool = True):
         """URL 直跳导航到菜单页面。
 
         verify=True 时，导航后检查页面是否包含预期内容（.h-form-item / .h-page / table），
         若三者均不存在则抛出 RuntimeError，防止静默跳转到错误页面。
         """
-        base = self.page.url.split("#")[0]
-        self.page.goto(f"{base}#{menu_url}", wait_until="domcontentloaded")
-        self.page.wait_for_timeout(3000)
-        logger.info(f"[OK] 导航到: #{menu_url}")
+        if self._is_legacy_tree_idx(menu_url):
+            self._navigate_legacy_tree(menu_url)
+        else:
+            base = self.page.url.split("#")[0]
+            self.page.goto(f"{base}#{menu_url}", wait_until="domcontentloaded")
+            self.page.wait_for_timeout(3000)
+            logger.info(f"[OK] 导航到: #{menu_url}")
 
         if verify:
-            has_form = self.page.locator('.h-form-item').count() > 0
-            has_page = self.page.locator('.h-page').count() > 0
-            has_table = self.page.locator('table').count() > 0
-            if not (has_form or has_page or has_table):
+            has_content = self._has_expected_navigation_content()
+            if not has_content:
                 raise RuntimeError(
-                    f"导航后页面无预期内容（无 .h-form-item / .h-page / table），"
+                    f"导航后页面无预期内容（无 .h-form-item / .h-page / table / .x-form-item / .x-grid3），"
                     f"可能跳转失败。当前 URL: {self.page.url}"
                 )
-            logger.info(
-                f"[OK] 导航验证通过: form={has_form}, page={has_page}, table={has_table}"
-            )
+            logger.info("[OK] 导航验证通过")
 
     def login(self, username: str, password: str, login_url: str):
         """自动登录 HUI 系统。
@@ -1192,19 +1506,31 @@ class CDPExecutor:
             self.page.get_by_role("textbox", name="用户名").fill(username)
             self.page.get_by_role("textbox", name="密码").fill(password)
         except Exception as e:
-            # 登录页可能已经不在（已登录状态）
-            logger.warning(f"登录表单填写失败（可能已登录）: {e}")
-            return
+            logger.debug(f"现代登录表单定位失败，尝试传统表单: {e}")
+            try:
+                self.page.locator('input[name="loginName"], input[type="text"]').first.fill(username)
+                self.page.locator('input[name="password"], input[type="password"]').first.fill(password)
+            except Exception as legacy_exc:
+                if self.page.get_by_text("欢迎").is_visible(timeout=1000):
+                    logger.info("[OK] 已处于登录状态")
+                    return
+                raise RuntimeError(f"登录表单填写失败: {legacy_exc}") from legacy_exc
 
         logger.info("点击登录按钮...")
-        self.page.get_by_role("button", name="登录").click()
+        try:
+            self.page.get_by_role("button", name="登录").click(timeout=3000)
+        except Exception:
+            self.page.locator('input[type="button"][value*="录"], input[type="submit"]').first.click(timeout=3000)
 
         # 等待登录成功标志
         try:
             self.page.get_by_text("欢迎").wait_for(state="visible", timeout=10000)
             logger.info("[OK] 登录成功：检测到'欢迎'")
         except Exception:
-            raise RuntimeError("登录失败：未检测到'欢迎'文本，请检查账号密码是否正确")
+            if self.page.locator('input[name="loginName"], input[type="password"]').count() == 0:
+                logger.info("[OK] 登录成功：登录表单已消失")
+            else:
+                raise RuntimeError("登录失败：未检测到'欢迎'文本，请检查账号密码是否正确")
 
         # 处理"流程状态刷新异常"弹窗
         self._handle_login_popup()
@@ -1337,12 +1663,17 @@ class CDPExecutor:
         Returns:
             排序后的 actions 列表
         """
+        def norm_label(value: str) -> str:
+            return re.sub(r"\s+", "", str(value or "")).lower()
+
         actions = list(actions)  # 不修改原列表
         for dep_label, prereqs in dependencies.items():
-            dep_idx = next((i for i, a in enumerate(actions) if a.get('label') == dep_label), None)
+            dep_key = norm_label(dep_label)
+            prereq_keys = {norm_label(item) for item in prereqs}
+            dep_idx = next((i for i, a in enumerate(actions) if norm_label(a.get('label')) == dep_key), None)
             if dep_idx is None:
                 continue
-            prereq_indices = [i for i, a in enumerate(actions) if a.get('label') in prereqs]
+            prereq_indices = [i for i, a in enumerate(actions) if norm_label(a.get('label')) in prereq_keys]
             if not prereq_indices:
                 continue
             max_prereq = max(prereq_indices)
@@ -1369,7 +1700,7 @@ class CDPExecutor:
           {"action": "click_outside"}
         """
         # 🔧 修复：依赖排序 - 级联字段（如 TA代码→产品代码）必须先选前置字段
-        _DEPENDENCIES = {"产品代码": ["TA代码"]}
+        _DEPENDENCIES = {"产品代码": ["TA代码"], "账号": ["账户类型"]}
         actions = self._sort_actions_by_deps(actions, _DEPENDENCIES)
 
         actual_values = {}
@@ -1593,6 +1924,8 @@ def main():
     parser.add_argument("--field-groups", help="字段组配置 JSON 文件")
     parser.add_argument("--skip-conditional-groups", action="store_true",
                         help="跳过 conditional 字段组的自动填入（双路查询空查分支用）")
+    parser.add_argument("--reset-before-actions", action=argparse.BooleanOptionalAction, default=True,
+                        help="执行 actions 前先清空条件；有 --navigate 时重新进入菜单，否则点击重置按钮（默认开启）")
     parser.add_argument("--write-back", help="将实际填入值写回 case_plan.json 路径")
     parser.add_argument("--save-log", help="将捕获的 SSH 日志保存到指定文件")
     parser.add_argument("--test-locator", help="测试 Locator 翻译（不执行）")
@@ -1696,10 +2029,19 @@ def main():
             executor.set_skip_conditional_groups(True)
 
         if args.actions:
-            if args.ssh_log:
-                executor.mark_log_position(args.ssh_log)
             with open(args.actions, "r", encoding="utf-8") as f:
                 actions = json.load(f)
+            if args.reset_before_actions:
+                if args.navigate_url:
+                    logger.info("[RESET] 执行动作前重新进入菜单，清空查询条件")
+                    executor.navigate(args.navigate_url)
+                    if args.explore:
+                        executor._locator_cache.clear()
+                else:
+                    logger.info("[RESET] 执行动作前点击重置按钮，清空查询条件")
+                    executor.reset_form()
+            if args.ssh_log:
+                executor.mark_log_position(args.ssh_log)
             executor.execute_actions(actions, write_back_path=args.write_back)
 
         if args.ssh_log:

@@ -332,12 +332,14 @@ async function connectToBrowser(cdpUrl: string, timeout: number, targetUrl: stri
  *  - textarea → input
  */
 async function scanDOM(page: any): Promise<ExploreField[]> {
-  const rawFields = await page.evaluate(() => {
+  const scanContext = async (context: any, frameName: string | null) => context.evaluate((frameNameArg: string | null) => {
     const results: Array<{
       label: string;
       domType: string;
       isRequired: boolean;
       selectorHint: string;
+      source: "hui" | "ext";
+      frameName: string | null;
     }> = [];
 
     // ─── 扫描 .h-form-item ───
@@ -413,11 +415,39 @@ async function scanDOM(page: any): Promise<ExploreField[]> {
         domType = "unknown";
       }
 
-results.push({
+      results.push({
         label,
         domType,
         isRequired,
         selectorHint: label,
+        source: "hui",
+        frameName: frameNameArg,
+      });
+    });
+
+    // ─── 扫描旧 Ext 表单项（GYYH 老框架 iframe 页面）───
+    const extItems = document.querySelectorAll(".x-form-item");
+    extItems.forEach((item: Element) => {
+      const rect = item.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return;
+      const labelEl = item.querySelector("label, .x-form-item-label");
+      const rawLabel = labelEl?.textContent || "";
+      const label = rawLabel.replace(/[:：]\s*$/, "").replace(/\*/g, "").trim();
+      if (!label || label.length > 30) return;
+
+      const inputs = Array.from(item.querySelectorAll("input:not([type='hidden']), textarea"));
+      if (inputs.length === 0) return;
+      const isRequired = rawLabel.includes("*") || item.textContent?.includes("*") || false;
+      const hasTrigger = !!item.querySelector(".x-form-trigger, .x-form-arrow-trigger, .x-form-date-trigger");
+      const hasReadonlyInput = inputs.some((input: any) => input.readOnly);
+      const domType = hasTrigger || hasReadonlyInput ? "single-select" : "input";
+      results.push({
+        label,
+        domType,
+        isRequired,
+        selectorHint: label,
+        source: "ext",
+        frameName: frameNameArg,
       });
     });
 
@@ -450,7 +480,27 @@ results.push({
           domType: "button",
           isRequired: false,
           selectorHint: text,
+          source: "hui",
+          frameName: frameNameArg,
         });
+      });
+    });
+
+    // ─── 扫描旧 Ext 按钮 ───
+    document.querySelectorAll(".x-btn button, button, input[type='button']").forEach((btn: Element) => {
+      const text = ((btn.textContent || (btn as HTMLInputElement).value || "")).trim();
+      if (!text || text.length > 15 || SEEN.has(text)) return;
+      if (!BUTTON_KEYWORDS.test(text)) return;
+      const style = window.getComputedStyle(btn as HTMLElement);
+      if (style.display === "none" || style.visibility === "hidden") return;
+      SEEN.add(text);
+      results.push({
+        label: text,
+        domType: "button",
+        isRequired: false,
+        selectorHint: text,
+        source: "ext",
+        frameName: frameNameArg,
       });
     });
 
@@ -471,17 +521,43 @@ results.push({
         domType: "button",
         isRequired: false,
         selectorHint: text,
+        source: "hui",
+        frameName: frameNameArg,
       });
     });
 
     return results;
-  });
+  }, frameName);
+
+  const contexts: Array<{ context: any; frameName: string | null }> = [{ context: page, frameName: null }];
+  try {
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame()) continue;
+      contexts.push({ context: frame, frameName: frame.name() || null });
+    }
+  } catch {}
+
+  const rawFields: Array<{
+    label: string;
+    domType: string;
+    isRequired: boolean;
+    selectorHint: string;
+    source: "hui" | "ext";
+    frameName: string | null;
+  }> = [];
+  for (const item of contexts) {
+    try {
+      rawFields.push(...await scanContext(item.context, item.frameName));
+    } catch (e: any) {
+      log.debug(`DOM 扫描 frame 失败 (${item.frameName || 'main'}): ${e.message}`);
+    }
+  }
 
   // ─── 转换为 ExploreField 并生成 Playwright locator ───
-  return rawFields.map((f: { label: string; domType: string; isRequired: boolean; selectorHint: string }) => ({
+  return rawFields.map((f: { label: string; domType: string; isRequired: boolean; selectorHint: string; source: "hui" | "ext"; frameName: string | null }) => ({
     label: f.label,
     type: mapDomType(f.domType),
-    locator: buildLocator(f.label, mapDomType(f.domType)),
+    locator: buildLocator(f.label, mapDomType(f.domType), f.source, f.frameName),
     isRequired: f.isRequired,
     conditionalRequiredBy: [] as string[],
     options: [] as string[],
@@ -690,45 +766,70 @@ function mapDomType(
 /** 构建稳定的 Playwright locator 字符串 */
 function buildLocator(
   label: string,
-  type: "input" | "single-select" | "multi-select" | "tree-select" | "button"
+  type: "input" | "single-select" | "multi-select" | "tree-select" | "button",
+  source: "hui" | "ext" = "hui",
+  frameName: string | null = null
 ): string {
   const escaped = escapeForLocator(label);
+  const framePrefix = frameName
+    ? `page.frameLocator('iframe[name="${escapeForDoubleQuotedSelector(frameName)}"]')`
+    : "page";
+
+  if (source === "ext") {
+    switch (type) {
+      case "button":
+        return `${framePrefix}.getByText('${escaped}', { exact: true })`;
+      case "single-select":
+        return (
+          `${framePrefix}.locator('.x-form-item')` +
+          `.filter({ hasText: '${escaped}' })` +
+          `.locator('input:not([type="hidden"])').first()`
+        );
+      case "input":
+      default:
+        return (
+          `${framePrefix}.locator('.x-form-item')` +
+          `.filter({ hasText: '${escaped}' })` +
+          `.locator('input:not([type="hidden"]), textarea').first()`
+        );
+    }
+  }
 
   switch (type) {
     case "button":
-      return `page.getByRole('button', { name: '${escaped}' })`;
+      return `${framePrefix}.getByRole('button', { name: '${escaped}' })`;
 
     case "input":
       return (
-        `page.locator('.h-form-item')` +
+        `${framePrefix}.locator('.h-form-item')` +
         `.filter({ hasText: '${escaped}' })` +
         `.getByRole('textbox')`
       );
 
     case "single-select":
       return (
-        `page.locator('.h-form-item')` +
+        `${framePrefix}.locator('.h-form-item')` +
         `.filter({ hasText: '${escaped}' })` +
         `.locator('.h-select-input')`
       );
 
     case "multi-select":
       return (
-        `page.locator('.h-form-item')` +
+        `${framePrefix}.locator('.h-form-item')` +
         `.filter({ hasText: '${escaped}' })` +
         `.locator('.h-select-multiple')`
       );
 
     case "tree-select":
       return (
-        `page.locator('.h-form-item')` +
+        `${framePrefix}.locator('.h-form-item')` +
         `.filter({ hasText: '${escaped}' })` +
         `.locator('button.choose-btn')`
       );
 
     default:
       return (
-        `page.locator('.h-form-item')` +
+        `${framePrefix}.locator('.h-form-item')` +
         `.filter({ hasText: '${escaped}' })`
       );
   }
@@ -737,6 +838,10 @@ function buildLocator(
 /** 转义 locator 字符串中的特殊字符 */
 function escapeForLocator(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function escapeForDoubleQuotedSelector(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 // ═══════════════════════════════════════════════════════════════

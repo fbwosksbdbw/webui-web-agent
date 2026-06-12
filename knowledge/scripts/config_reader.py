@@ -32,6 +32,39 @@ _MODULE_EN_TO_CN = {
     'per': '个人养老金',
     'pension': '个人养老金',
 }
+_MENU_NAME_PREFIXES = (
+    '基金代销',
+    '信托代销',
+    '理财代销',
+    '商业养老金',
+    '个人养老金',
+    '保险代销',
+    '汇市通',
+)
+
+
+def _normalize_menu_display_name(menu_name: str) -> str:
+    text = str(menu_name or '').strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _MENU_NAME_PREFIXES:
+            if text.startswith(prefix) and len(text) > len(prefix):
+                text = text[len(prefix):].strip()
+                changed = True
+    return text
+
+
+def _menu_tree_depth(tree_idx: str) -> int:
+    return len([part for part in str(tree_idx or '').split('#') if part])
+
+
+def _menu_url_rank(entry: dict) -> tuple:
+    tree_idx = entry.get('tree_idx', '')
+    depth = _menu_tree_depth(tree_idx)
+    is_tree_idx = 1 if '#' in str(tree_idx) else 0
+    # 同名父子节点并存时，优先叶子/更深节点，避免勘测停在目录节点。
+    return (is_tree_idx, depth)
 
 
 def _load_field_semantics() -> dict:
@@ -177,6 +210,9 @@ class ConfigReader:
         """
         if not url:
             return ''
+        if '#' in url:
+            parts = [p for p in url.strip('#').split('#') if p]
+            return parts[-1] if parts else ''
         parts = [p for p in url.rstrip('/').split('/') if p]
         return parts[-1] if parts else ''
 
@@ -279,9 +315,21 @@ class ConfigReader:
         return entry.get('tree_idx', '')
 
     def get_menu_url_by_name(self, menu_name: str) -> str:
-        for code, entry in self.menu_urls.items():
-            if entry.get('menu_name') == menu_name:
-                return entry.get('tree_idx', '')
+        normalized_name = _normalize_menu_display_name(menu_name)
+        exact_matches = [
+            entry for entry in self.menu_urls.values()
+            if entry.get('menu_name') == menu_name and entry.get('tree_idx')
+        ]
+        if exact_matches:
+            return max(exact_matches, key=_menu_url_rank).get('tree_idx', '')
+
+        normalized_matches = []
+        for entry in self.menu_urls.values():
+            entry_name = entry.get('menu_name', '')
+            if entry_name and _normalize_menu_display_name(entry_name) == normalized_name and entry.get('tree_idx'):
+                normalized_matches.append(entry)
+        if normalized_matches:
+            return max(normalized_matches, key=_menu_url_rank).get('tree_idx', '')
         return ''
 
     def get_menu_url(self, menu_name: str) -> str:
@@ -548,10 +596,16 @@ PRESET_SQL_BASE = os.path.join(
             )
         level1 = menu.get('导航一级菜单', '')
 
-        # 根据一级菜单确定业务模块（从 Excel「环境配置」的 log_path_module_keywords 读取）
+        # 根据导航文本确定业务模块（从 Excel「环境配置」的 log_path_module_keywords 读取）。
+        # GYYH 单库环境的 Excel 导航一级菜单是真实页面树（如「查询管理」），
+        # 不能再把它当作旧业务模块名；查询管理默认落到理财代销工程路径。
         # 格式: "关键词1:模块名1,关键词2:模块名2"，如 "基金:dxfund,信托:dxtrust,商业养老金:dxcp"
         log_path_module_keywords = self.get_env('log_path_module_keywords', '')
-        module = infer_module_from_keyword_mapping(level1, log_path_module_keywords)
+        level2 = menu.get('导航二级菜单', '')
+        level3 = menu.get('导航三级菜单', '')
+        default_module = 'fina' if self.get_env('single_db_key', '') and str(url).startswith('ifmquerymanage#') else 'dxtrust'
+        module_text = ' '.join([level1, level2, level3, menu_name, url])
+        module = infer_module_from_keyword_mapping(module_text, log_path_module_keywords, default=default_module)
 
         # 从 conf/config.py 的 TEST_CASE_DIRS 查表
         test_case_rel = ''
@@ -564,7 +618,10 @@ PRESET_SQL_BASE = os.path.join(
                 project_root = os.path.dirname(os.path.dirname(os.path.dirname(SKILL_DIR)))
             sys.path.insert(0, project_root)
             from conf.config import Config
-            test_case_rel = Config.TEST_CASE_DIRS.get(level1, '')
+            for path_key in (level1, module_to_chinese(module)):
+                test_case_rel = Config.TEST_CASE_DIRS.get(path_key, '')
+                if test_case_rel:
+                    break
             if not env_key:
                 env_key = resolve_env(module, project_root)
 
@@ -975,12 +1032,14 @@ def main():
                     actions.append({'action': 'multi_select', 'label': label, 'values': [value]})
 
         # 依赖排序：级联字段（如 TA代码→产品代码）必须先选前置字段
-        _DEPENDENCIES = {"产品代码": ["TA代码"]}
+        _DEPENDENCIES = {"产品代码": ["TA代码"], "账号": ["账户类型"]}
         for dep_label, prereqs in _DEPENDENCIES.items():
-            dep_idx = next((i for i, a in enumerate(actions) if a.get('label') == dep_label), None)
+            norm = lambda value: ''.join(str(value or '').split()).lower()
+            dep_idx = next((i for i, a in enumerate(actions) if norm(a.get('label')) == norm(dep_label)), None)
             if dep_idx is None:
                 continue
-            prereq_indices = [i for i, a in enumerate(actions) if a.get('label') in prereqs]
+            prereq_keys = {norm(p) for p in prereqs}
+            prereq_indices = [i for i, a in enumerate(actions) if norm(a.get('label')) in prereq_keys]
             max_prereq = max(prereq_indices) if prereq_indices else -1
             if max_prereq > dep_idx:
                 # 把依赖字段移到所有前置字段之后

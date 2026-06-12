@@ -47,6 +47,43 @@ def test_get_db_connection_uses_oracledb_for_oracle_config(monkeypatch):
     }
 
 
+def test_get_db_connection_initializes_oracle_thick_client_from_config(monkeypatch):
+    module = _load_build_schema_cache()
+    calls = []
+
+    class Config:
+        @staticmethod
+        def get_db_config(_env_key):
+            return {
+                "common": {
+                    "host": "10.20.27.108",
+                    "port": 1521,
+                    "db_type": "oracle",
+                    "oracle_client_lib_dir": r"D:\hundsun\Oracle\bin",
+                },
+                "databases": {
+                    "GYYHAUTO": {"user": "gyyhauto", "password": "handsome", "database": "orcl"}
+                },
+            }
+
+    fake_config_module = types.ModuleType("conf.config")
+    fake_config_module.Config = Config
+    monkeypatch.setitem(sys.modules, "conf", types.ModuleType("conf"))
+    monkeypatch.setitem(sys.modules, "conf.config", fake_config_module)
+
+    fake_oracledb = types.SimpleNamespace(
+        init_oracle_client=lambda **kwargs: calls.append(("init", kwargs)),
+        connect=lambda **kwargs: calls.append(("connect", kwargs)) or types.SimpleNamespace(),
+    )
+    monkeypatch.setitem(sys.modules, "oracledb", fake_oracledb)
+
+    conn = module.get_db_connection("GYYHAUTO", env_key="gyyh-auto")
+
+    assert conn is not None
+    assert calls[0] == ("init", {"lib_dir": r"D:\hundsun\Oracle\bin"})
+    assert calls[1][0] == "connect"
+
+
 def test_describe_table_oracle_returns_describe_compatible_rows():
     module = _load_build_schema_cache()
 
@@ -121,9 +158,46 @@ def test_build_table_db_mapping_maps_oracle_tables_to_single_db_family(monkeypat
     assert saved["tbcustomer"] == ["GYYHAUTO"]
 
 
+def test_build_table_db_mapping_replaces_legacy_mapping_for_single_db(monkeypatch):
+    module = _load_build_schema_cache()
+    saved = {}
+
+    class Cursor:
+        def execute(self, _sql, _params=None):
+            pass
+
+        def fetchall(self):
+            return [("TBPRODUCT",), ("TSYS_MENU",)]
+
+        def close(self):
+            pass
+
+    class Connection:
+        _hui_db_type = "oracle"
+
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module, "get_db_connection", lambda _db, env_key=None: Connection())
+    monkeypatch.setattr(
+        module,
+        "load_table_db_mapping",
+        lambda force_reload=False: {"legacy_only": ["ui_fund"], "tbproduct": ["ui_bc"]},
+    )
+    monkeypatch.setattr(module, "save_table_db_mapping", lambda mapping: saved.update(mapping))
+
+    mapping = module.build_table_db_mapping(["GYYHAUTO"], env_key="gyyh-auto")
+
+    assert mapping == {"tbproduct": ["GYYHAUTO"], "tsys_menu": ["GYYHAUTO"]}
+    assert saved == mapping
+
+
 def test_build_cache_passes_oracle_unique_constraints_to_schema_seed(monkeypatch):
     module = _load_build_schema_cache()
-    seeded = {}
+    saved_cache = {}
     saved_mapping = {}
 
     class Cursor:
@@ -152,24 +226,63 @@ def test_build_cache_passes_oracle_unique_constraints_to_schema_seed(monkeypatch
         def close(self):
             pass
 
-    def fake_seed(table, rows, unique_indexes=None):
-        seeded["table"] = table
-        seeded["rows"] = rows
-        seeded["unique_indexes"] = unique_indexes
-        return {"required_columns": ["customer_id"], "all_columns": ["customer_id"]}
-
     monkeypatch.setattr(module, "get_db_connection", lambda _db, env_key=None: Connection())
     monkeypatch.setattr(module, "load_schema_cache", lambda: {})
+    monkeypatch.setattr(module, "load_db_cache", lambda _family: {})
     monkeypatch.setattr(module, "save_schema_cache", lambda _cache: None)
-    monkeypatch.setattr(module, "seed_cache_from_describe", fake_seed)
+    monkeypatch.setattr(module, "_save_db_family_cache", lambda family, cache: saved_cache.update({"family": family, "cache": cache}))
     monkeypatch.setattr(module, "load_table_db_mapping", lambda force_reload=False: {})
     monkeypatch.setattr(module, "save_table_db_mapping", lambda mapping: saved_mapping.update(mapping))
 
     module.build_cache({"GYYHAUTO": ["tb_customer"]}, env_key="gyyh-auto")
 
-    assert seeded["table"] == "tb_customer"
     assert saved_mapping["tb_customer"] == ["GYYHAUTO"]
-    assert seeded["unique_indexes"] == [
+    assert saved_cache["family"] == "GYYHAUTO"
+    assert saved_cache["cache"]["tb_customer"]["unique_indexes"] == [
         {"name": "PK_TB_CUSTOMER", "columns": ["customer_id"]},
         {"name": "UK_TB_CUSTOMER_NO", "columns": ["customer_no"]},
     ]
+
+
+def test_build_cache_auto_discovers_all_tables_for_single_db(monkeypatch):
+    module = _load_build_schema_cache()
+    saved_tables = []
+
+    class Cursor:
+        def __init__(self):
+            self.sql = ""
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            if "user_tables" in self.sql.lower():
+                return [("TBCUSTOMER",), ("TBORDER",)]
+            if "USER_TAB_COLUMNS" in self.sql:
+                table_name = "CUSTOMER_ID" if self.sql else "ID"
+                return [(table_name, "VARCHAR2", 32, None, None, "N", None)]
+            return []
+
+        def close(self):
+            pass
+
+    class Connection:
+        _hui_db_type = "oracle"
+
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module, "get_db_connection", lambda _db, env_key=None: Connection())
+    monkeypatch.setattr(module, "load_schema_cache", lambda: {})
+    monkeypatch.setattr(module, "save_schema_cache", lambda _cache: None)
+    monkeypatch.setattr(module, "load_db_cache", lambda _family: {})
+    monkeypatch.setattr(module, "_save_db_family_cache", lambda _family, cache: saved_tables.extend(cache.keys()))
+    monkeypatch.setattr(module, "load_table_db_mapping", lambda force_reload=False: {})
+    monkeypatch.setattr(module, "save_table_db_mapping", lambda _mapping: None)
+
+    module.build_cache({"GYYHAUTO": []}, auto_discover=True, env_key="gyyh-auto")
+
+    assert saved_tables == ["tbcustomer", "tborder"]

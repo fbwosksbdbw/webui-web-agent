@@ -418,7 +418,7 @@ def test_return_precheck_substitutes_current_params_before_counting(tmp_path, mo
     assert any("bank_acc='A1'" in sql and "open_branch='0011'" in sql for sql in conn.cursor_obj.executed)
 
 
-def test_return_precheck_executes_base_sql_on_ui_bc_and_business_sql_on_target_db(tmp_path, monkeypatch):
+def test_return_precheck_executes_base_and_business_sql_on_single_db(tmp_path, monkeypatch):
     module = _load_sql_return_precheck()
     connections = {}
     load_calls = []
@@ -465,16 +465,16 @@ def test_return_precheck_executes_base_sql_on_ui_bc_and_business_sql_on_target_d
         encoding="utf-8",
     )
 
-    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_fund2")
+    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="GYYHAUTO")
 
     assert result["status"] == "passed"
-    assert load_calls[:1] == ["ui_fund2"]
+    assert load_calls[:1] == ["GYYHAUTO"]
     assert "ui_bc" not in connections
-    assert any("ui_bc.tbclientmap" in sql for sql in connections["ui_fund2"].cursor_obj.executed)
-    assert any("biztable" in sql for sql in connections["ui_fund2"].cursor_obj.executed)
+    assert any("tbclientmap" in sql and "ui_bc.tbclientmap" not in sql for sql in connections["GYYHAUTO"].cursor_obj.executed)
+    assert any("biztable" in sql for sql in connections["GYYHAUTO"].cursor_obj.executed)
 
 
-def test_return_precheck_qualifies_base_join_tables_for_business_sql():
+def test_return_precheck_keeps_join_tables_unqualified_for_single_db_project():
     module = _load_sql_return_precheck()
     case_plan = {
         "preset_strategy": {
@@ -493,8 +493,8 @@ def test_return_precheck_qualifies_base_join_tables_for_business_sql():
     qualified = module._qualify_cross_db_tables(sql, case_plan)
 
     assert "from tbdxfundpayment a" in qualified
-    assert "join ui_bc.tbdxfundprdbankacc d" in qualified
-    assert ", ui_bc.tbtainfo b" in qualified
+    assert "join tbdxfundprdbankacc d" in qualified
+    assert ",tbtainfo b" in qualified
 
 
 def test_return_precheck_does_not_qualify_base_tables_for_single_db():
@@ -630,7 +630,7 @@ def test_count_sql_skips_named_parameter_placeholders():
     assert skip_reason == "named_placeholder_sql"
 
 
-def test_permission_precheck_uses_base_cursor_for_base_only_permission_sql(tmp_path, monkeypatch):
+def test_permission_precheck_uses_single_db_for_base_only_permission_sql(tmp_path, monkeypatch):
     module = _load_sql_return_precheck()
     connections = {}
 
@@ -672,8 +672,13 @@ def test_permission_precheck_uses_base_cursor_for_base_only_permission_sql(tmp_p
         encoding="utf-8",
     )
 
-    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_trust2")
+    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="GYYHAUTO")
 
     assert result["permission_checks"]["branch"]["status"] == "passed"
     assert "ui_bc" not in connections
-    assert any("ui_bc.tbhisassetacc" in sql and "open_branch in ('0011')" in sql for sql in connections["ui_trust2"].cursor_obj.executed)
+    assert any(
+        "tbhisassetacc" in sql
+        and "ui_bc.tbhisassetacc" not in sql
+        and "open_branch in ('0011')" in sql
+        for sql in connections["GYYHAUTO"].cursor_obj.executed
+    )
