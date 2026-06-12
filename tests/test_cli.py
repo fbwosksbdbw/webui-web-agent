@@ -9,7 +9,7 @@ def test_cli_accepts_required_public_commands():
     parser = build_parser()
 
     assert parser.parse_args(["menus"]).command == "menus"
-    assert parser.parse_args(["menus"]).skill_root.endswith("hui-playwright-agent\\knowledge")
+    assert parser.parse_args(["menus"]).skill_root.endswith("knowledge")
     assert parser.parse_args(["--runs-root", "runs", "menus"]).runs_root == "runs"
     assert parser.parse_args(["run", "--menu", "基金分红查询"]).menu == "基金分红查询"
     assert parser.parse_args(["batch"]).command == "batch"

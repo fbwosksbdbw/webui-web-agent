@@ -73,3 +73,19 @@ def test_table_snapshot_serializes_decimal_values():
     snapshot = module.query_table_snapshot(Connection(), "biztable")
 
     assert snapshot["rows"] == [{"amount": "12.30"}]
+
+
+def test_snapshot_connect_db_reuses_dry_run_oracle_connection(monkeypatch):
+    module = _load_query_db_snapshot()
+    calls = {}
+
+    def fake_connect(db_cfg):
+        calls["db_cfg"] = db_cfg
+        return object()
+
+    monkeypatch.setattr(module.dry_run_sql, "_connect", fake_connect)
+
+    conn = module.connect_db({"db_type": "oracle", "database": "GYYHAUTO"})
+
+    assert conn is not None
+    assert calls["db_cfg"] == {"db_type": "oracle", "database": "GYYHAUTO"}

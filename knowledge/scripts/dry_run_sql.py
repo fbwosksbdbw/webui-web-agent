@@ -191,6 +191,12 @@ def _load_db_config(config_json_path: str, db_key: str, env_override: str = None
 
     db_info = db_config['databases'][db_key]
     common = db_config.get('common', {})
+    db_type = (
+        db_info.get('db_type')
+        or common.get('db_type')
+        or env.get('db_type')
+        or 'mysql'
+    )
 
     return {
         'host': common.get('host', ''),
@@ -198,13 +204,33 @@ def _load_db_config(config_json_path: str, db_key: str, env_override: str = None
         'user': db_info.get('user', ''),
         'password': db_info.get('password', ''),
         'database': db_info.get('database', db_key),
+        'db_type': str(db_type).lower(),
         'charset': 'utf8mb4',
         'autocommit': common.get('autocommit', True),
     }
 
 
 def _connect(db_cfg: dict):
-    """建立 MySQL 连接"""
+    """建立数据库连接"""
+    db_type = str(db_cfg.get('db_type') or 'mysql').lower()
+    if db_type == 'oracle':
+        try:
+            import oracledb
+        except ImportError:
+            raise ImportError("请安装 oracledb: pip install oracledb")
+
+        dsn = db_cfg.get('dsn') or f"{db_cfg['host']}:{db_cfg['port']}/{db_cfg['database']}"
+        conn = oracledb.connect(
+            user=db_cfg['user'],
+            password=db_cfg['password'],
+            dsn=dsn,
+        )
+        try:
+            conn._hui_db_type = db_type
+        except Exception:
+            pass
+        return conn
+
     try:
         import pymysql
     except ImportError:
@@ -219,6 +245,10 @@ def _connect(db_cfg: dict):
         charset=db_cfg.get('charset', 'utf8mb4'),
         connect_timeout=10,
     )
+    try:
+        conn._hui_db_type = db_type
+    except Exception:
+        pass
     return conn
 
 
@@ -232,19 +262,23 @@ def dry_run_statements(conn, statements: list) -> dict:
     """
     result = {"ok": True, "total": 0, "passed": 0, "failed": 0, "errors": []}
     cursor = conn.cursor()
+    db_type = str(getattr(conn, '_hui_db_type', 'mysql') or 'mysql').lower()
+    uses_mysql_transaction_commands = db_type == 'mysql'
 
     # 禁用外键检查（session 级别，避免父表数据不存在导致误报）
-    try:
-        cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
-    except Exception:
-        pass
+    if uses_mysql_transaction_commands:
+        try:
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
+        except Exception:
+            pass
 
     transaction_active = False
-    try:
-        cursor.execute("START TRANSACTION")
-        transaction_active = True
-    except Exception:
-        transaction_active = False
+    if uses_mysql_transaction_commands:
+        try:
+            cursor.execute("START TRANSACTION")
+            transaction_active = True
+        except Exception:
+            transaction_active = False
 
     for stmt, line_num in statements:
         if not _is_dml(stmt):
@@ -254,7 +288,7 @@ def dry_run_statements(conn, statements: list) -> dict:
         stmt_preview = stmt[:120] + ('...' if len(stmt) > 120 else '')
 
         try:
-            if not transaction_active:
+            if uses_mysql_transaction_commands and not transaction_active:
                 cursor.execute("START TRANSACTION")
                 transaction_active = True
             cursor.execute(stmt)
@@ -298,14 +332,15 @@ def dry_run_statements(conn, statements: list) -> dict:
             elif '1452' in str(e.args[0]) if hasattr(e, 'args') else '':
                 print(f"    ↳ 外键约束 → 检查父表数据是否存在")
 
-    if transaction_active:
+    if transaction_active or not uses_mysql_transaction_commands:
         conn.rollback()
 
     # 恢复外键检查
-    try:
-        cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
-    except Exception:
-        pass
+    if uses_mysql_transaction_commands:
+        try:
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
+        except Exception:
+            pass
 
     cursor.close()
     return result

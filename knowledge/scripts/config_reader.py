@@ -372,8 +372,37 @@ PRESET_SQL_BASE = os.path.join(
         """根据 customer_id 计算分片库（分表以日志物理表名为准，不再计算）。
         module: dxtrust | dxfund | fina | dxcp
         """
-        import pymysql
         import re
+
+        module = normalize_module(module)
+        single_db_key = str(self.get_env('single_db_key', '') or '').strip()
+        if single_db_key:
+            in_client_no_text = _normalize_in_client_no(
+                '',
+                self.get_preset('in_client_no', ''),
+                self.get_preset('customer_id', ''),
+            )
+            return {
+                'env_name': self.get_env('env_key', ''),
+                'module': module,
+                'customer_id': self.get_preset('customer_id', ''),
+                'in_client_no': in_client_no_text,
+                'last8': in_client_no_text[-8:] if len(in_client_no_text) >= 8 else in_client_no_text.zfill(8),
+                'route_number': int(in_client_no_text[-8:]) if len(in_client_no_text) >= 8 and in_client_no_text[-8:].isdigit() else 0,
+                'has_db2': False,
+                'db_prefix': single_db_key,
+                'trans_db_num': 1,
+                'trans_db_remainder': 0,
+                'trans_db_quotient': 0,
+                'trans_table_num': 0,
+                'pub_table_num': 0,
+                'db_name': single_db_key,
+                'routing_db': single_db_key,
+                'db_type': str(self.get_env('db_type', 'mysql') or 'mysql'),
+                'formula': f'single_db({single_db_key})',
+            }
+
+        import pymysql
 
         # 从 conf/config.py 获取数据库配置
         project_root = self.get_env('project_dir', '') or os.path.dirname(os.path.dirname(os.path.dirname(SKILL_DIR)))
@@ -381,7 +410,6 @@ PRESET_SQL_BASE = os.path.join(
         from conf.config import Config
 
         # module → 业务关键词（最小映射，无法从缩写推导）
-        module = normalize_module(module)
         try:
             keyword = env_keyword(module)
         except ValueError as exc:

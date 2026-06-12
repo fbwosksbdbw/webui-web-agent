@@ -171,6 +171,26 @@ def test_business_insert_plan_prefers_routing_db_when_shard_db_is_base_db():
     assert plans[0].db == "ui_fund2"
 
 
+def test_insert_plan_uses_single_db_key_for_base_and_business_tables():
+    case_plan = {
+        "env": {"single_db_key": "GYYHAUTO"},
+        "preset_strategy": {"base_tables": ["basetable"], "biz_tables": ["biztable"]},
+        "shard": {"db": "GYYHAUTO", "routing_db": "GYYHAUTO"},
+    }
+    schema_cache = {
+        "basetable": {"required_columns": ["id"], "all_columns": ["id"]},
+        "biztable": {"required_columns": ["id"], "all_columns": ["id"]},
+    }
+
+    plans, skipped = build_insert_plans(case_plan, schema_cache=schema_cache, include_skipped=True)
+
+    assert skipped == []
+    assert {plan.table: plan.db for plan in plans} == {
+        "basetable": "GYYHAUTO",
+        "biztable": "GYYHAUTO",
+    }
+
+
 def test_multi_db_mapping_prefers_current_routing_family():
     from hui_agent.insert_plan import _resolve_plan_db
 
@@ -875,9 +895,29 @@ def test_generated_pytest_passes_menu_env_to_db_executor():
     code = render_pytest_case(case_plan, "queryall")
 
     assert 'DB_ENV_NAME = "ifm60-dxfund"' in code
-    assert 'PRESET_DB_KEY = "ui_fund2"' in code
-    assert "get_async_db_executor(env_name=DB_ENV_NAME, db_key=BASE_DB_KEY, dbtype=\"mysql\")" in code
-    assert "get_async_db_executor(env_name=DB_ENV_NAME, db_key=PRESET_DB_KEY, dbtype=\"mysql\")" in code
+    assert 'DB_KEY = "ui_fund2"' in code
+    assert 'DB_TYPE = "mysql"' in code
+    assert "get_async_db_executor(env_name=DB_ENV_NAME, db_key=DB_KEY, dbtype=DB_TYPE)" in code
+    compile(code, "generated.py", "exec")
+
+
+def test_generated_pytest_uses_single_oracle_db_key_when_configured():
+    case_plan = {
+        "env_key": "gyyh-auto",
+        "env": {"single_db_key": "GYYHAUTO", "db_type": "oracle"},
+        "menu": {"name": "菜单A", "code": "FUNC_A", "level1": "贵阳银行", "level2": "查询", "url": "/menu"},
+        "case_inputs": {"queryall": {"fields": []}},
+        "shard": {"db": "GYYHAUTO"},
+        "insert_plans": [{"table": "t", "columns": [{"name": "id", "value": "1"}]}],
+    }
+
+    code = render_pytest_case(case_plan, "queryall")
+
+    assert 'DB_KEY = "GYYHAUTO"' in code
+    assert 'DB_TYPE = "oracle"' in code
+    assert "BASE_DB_KEY" not in code
+    assert "PRESET_DB_KEY" not in code
+    assert "get_async_db_executor(env_name=DB_ENV_NAME, db_key=DB_KEY, dbtype=DB_TYPE)" in code
     compile(code, "generated.py", "exec")
 
 

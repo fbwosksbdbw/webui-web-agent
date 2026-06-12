@@ -49,7 +49,10 @@ def render_pytest_case(
     level2 = menu.get("level2", "")
     menu_name = menu.get("name", "")
     owner = case_plan.get("owner", "") or case_plan.get("menu", {}).get("owner", "")
+    env = case_plan.get("env", {}) if isinstance(case_plan.get("env"), dict) else {}
     shard_db = case_plan.get("shard", {}).get("db", "ui_bc")
+    db_key = str(env.get("single_db_key") or shard_db or "ui_bc")
+    db_type = str(env.get("db_type") or case_plan.get("db_type") or "mysql")
     env_key = case_plan.get("env_key", "")
     decorators = _render_test_decorators(case_type)
     query_wait_seconds = 300 if case_type == "queryall" else 60
@@ -70,8 +73,8 @@ PRESET_SQL_BASE = os.path.join(
 PRESET_SQL = os.path.join(
     PROJECT_ROOT, Config.SQL_DATA_DIRS[{_py_str(str(level1))}], {_py_str(str(level2))}, {_py_str(str(menu_name))}, {_py_str(str(func_code) + ".sql")}
 )
-BASE_DB_KEY = "ui_bc"
-PRESET_DB_KEY = {_py_str(str(shard_db or "ui_bc"))}
+DB_KEY = {_py_str(db_key)}
+DB_TYPE = {_py_str(db_type)}
 DB_ENV_NAME = {_py_str(str(env_key or ""))} or getattr(Config, "env_name", None)
 
 
@@ -80,7 +83,7 @@ async def db_setup_base():
     if not PRESET_SQL_BASE:
         yield None
         return
-    async with get_async_db_executor(env_name=DB_ENV_NAME, db_key=BASE_DB_KEY, dbtype="mysql") as executor:
+    async with get_async_db_executor(env_name=DB_ENV_NAME, db_key=DB_KEY, dbtype=DB_TYPE) as executor:
         await executor.execute_sql_files([PRESET_SQL_BASE])
         yield executor
 
@@ -90,7 +93,7 @@ async def db_setup():
     if not PRESET_SQL:
         yield None
         return
-    async with get_async_db_executor(env_name=DB_ENV_NAME, db_key=PRESET_DB_KEY, dbtype="mysql") as executor:
+    async with get_async_db_executor(env_name=DB_ENV_NAME, db_key=DB_KEY, dbtype=DB_TYPE) as executor:
         await executor.execute_sql_files([PRESET_SQL])
         yield executor
 

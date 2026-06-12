@@ -1985,16 +1985,27 @@ def _run_one_sql_dry_run(
 
 
 def _sql_dry_run_db_key(kind: str, case_plan: dict) -> str:
+    single_db_key = _single_db_key(case_plan)
+    if single_db_key:
+        return single_db_key
     if kind == "base_sql":
         return "ui_bc"
     return _business_db_key(case_plan)
 
 
 def _business_db_key(case_plan: dict) -> str:
+    single_db_key = _single_db_key(case_plan)
+    if single_db_key:
+        return single_db_key
     shard = case_plan.get("shard", {})
     if not isinstance(shard, dict):
         return "ui_bc"
     return str(shard.get("routing_db") or shard.get("db") or "ui_bc")
+
+
+def _single_db_key(case_plan: dict) -> str:
+    env = case_plan.get("env", {}) if isinstance(case_plan.get("env"), dict) else {}
+    return str(env.get("single_db_key") or case_plan.get("single_db_key") or "").strip()
 
 
 def _write_dry_run_diagnostic_sql(case_plan: dict, case_dir: Path, source_path: Path, kind: str, db_key: str) -> Path:
@@ -2560,8 +2571,9 @@ def _query_db_snapshot_for_diagnosis(
     sql_paths = _resolve_path_map(case_plan.get("sql_paths", {}), case_plan_dir)
     env = _load_json(Path(config_path)).get("env", {})
     snapshots: dict[str, dict] = {}
+    base_db = _single_db_key(case_plan) or "ui_bc"
     for kind, db in (
-        ("base_sql", "ui_bc"),
+        ("base_sql", base_db),
         ("preset_sql", _business_db_key(case_plan)),
     ):
         sql_file = sql_paths.get(kind, "")
@@ -3869,7 +3881,7 @@ def _refresh_schema_cache_for_dry_run_tables(
     tables = _extract_tables_from_sql_files(case_plan, case_plan_dir)
     if not tables:
         return
-    db = str(case_plan.get("shard", {}).get("db") or "ui_bc")
+    db = _single_db_key(case_plan) or str(case_plan.get("shard", {}).get("db") or "ui_bc")
     env = config.get("env", {}) if isinstance(config, dict) else {}
     args = ["--tables", *tables, "--db", db]
     if env.get("project_dir"):
@@ -3916,7 +3928,7 @@ def _refresh_schema_cache_for_missing_tables(
     tables = _missing_schema_physical_tables(skipped)
     if not tables:
         return
-    db = str(case_plan.get("shard", {}).get("db") or "ui_bc")
+    db = _single_db_key(case_plan) or str(case_plan.get("shard", {}).get("db") or "ui_bc")
     env = config.get("env", {}) if isinstance(config, dict) else {}
     args = ["--tables", *tables, "--db", db]
     if env.get("project_dir"):
