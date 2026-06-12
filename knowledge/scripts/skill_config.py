@@ -26,6 +26,9 @@ def resolve_env(module: str, project_dir: str = None) -> str:
         sys.path.insert(0, project_dir)
     from conf.config import Config
 
+    if len(getattr(Config, "env_dbs", {})) == 1:
+        return next(iter(Config.env_dbs))
+
     module = normalize_module(module)
     keyword = env_keyword(module)
 
