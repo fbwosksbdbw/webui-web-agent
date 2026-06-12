@@ -11,11 +11,13 @@ def _load_explore_wrapper(path: Path):
 
 
 def _wrapper_paths():
-    root = Path(__file__).resolve().parents[2]
-    return [
-        root / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
-        root / "hui-playwright-agent" / "knowledge" / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        repo_root / "knowledge" / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
+        repo_root.parent / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
+        repo_root.parent / "hui-playwright-agent" / "knowledge" / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
     ]
+    return [path for path in candidates if path.exists()]
 
 
 def test_select_preset_wins_when_explored_options_are_stale():

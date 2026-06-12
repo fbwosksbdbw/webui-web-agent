@@ -102,6 +102,7 @@ def build_insert_plans(
     physical_tables = case_plan.get("shard", {}).get("physical_tables", {})
     shard = case_plan.get("shard", {})
     routing_db = str(shard.get("routing_db") or shard.get("db") or "")
+    single_db_key = _single_db_key(case_plan)
     value_context = _build_value_context(case_plan)
     join_key_columns = _join_key_columns(case_plan)
     requirement_columns = _requirement_columns_by_table(case_plan)
@@ -156,7 +157,13 @@ def build_insert_plans(
                         columns=effective_columns,
                         delete_where=delete_where.clause,
                         rows=rows,
-                        db=_resolve_plan_db(table, role, table_db_mapping, routing_db=routing_db),
+                        db=_resolve_plan_db(
+                            table,
+                            role,
+                            table_db_mapping,
+                            routing_db=routing_db,
+                            single_db_key=single_db_key,
+                        ),
                         delete_where_diagnostic=delete_where.diagnostic,
                     )
                 )
@@ -1485,12 +1492,15 @@ def _resolve_plan_db(
     table_db_mapping: dict[str, str | list[str]] | None = None,
     *,
     routing_db: str = "",
+    single_db_key: str = "",
 ) -> str:
     """解析 InsertPlan 的 db 字段。
 
     - base 表 → 固定 ui_bc
     - business 表 → 先解析库族，再用 shard.db 路由到实际分片库
     """
+    if single_db_key:
+        return single_db_key
     if role == "base":
         return "ui_bc"
     t = table.lower()
@@ -1529,6 +1539,11 @@ def _route_plan_db(db: str, routing_db: str) -> str:
     if _db_family(db) == _db_family(routing_db):
         return routing_db
     return db
+
+
+def _single_db_key(case_plan: dict[str, Any]) -> str:
+    env = case_plan.get("env", {}) if isinstance(case_plan.get("env"), dict) else {}
+    return str(env.get("single_db_key") or case_plan.get("single_db_key") or "").strip()
 
 
 def _db_family(db_name: str) -> str:

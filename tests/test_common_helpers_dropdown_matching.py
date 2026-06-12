@@ -11,11 +11,13 @@ def _load_helpers(path: Path):
 
 
 def _helper_paths():
-    root = Path(__file__).resolve().parents[2]
-    return [
-        root / "assets" / "common" / "helpers.py",
-        root / "hui-playwright-agent" / "knowledge" / "assets" / "common" / "helpers.py",
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        repo_root / "knowledge" / "assets" / "common" / "helpers.py",
+        repo_root.parent / "assets" / "common" / "helpers.py",
+        repo_root.parent / "hui-playwright-agent" / "knowledge" / "assets" / "common" / "helpers.py",
     ]
+    return [path for path in candidates if path.exists()]
 
 
 def test_common_helper_dropdown_matcher_rejects_pagination_and_substring_noise():

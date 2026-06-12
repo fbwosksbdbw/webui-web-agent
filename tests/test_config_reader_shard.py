@@ -134,6 +134,31 @@ def test_compute_shard_falls_back_to_config_in_client_no_when_db_mapping_is_blan
     assert result["db_name"] == "ui_trust2"
 
 
+def test_compute_shard_uses_single_db_key_without_shard_calculation(tmp_path):
+    module = _load_config_reader_module()
+    presets = {
+        "customer_id": "A33060210021113",
+        "in_client_no": "33060210021113",
+    }
+    env = {
+        "project_dir": str(tmp_path),
+        "single_db_key": "GYYHAUTO",
+        "env_key": "gyyh-auto",
+        "db_type": "oracle",
+    }
+    reader = module.ConfigReader.__new__(module.ConfigReader)
+    reader.get_env = lambda key, default=None: env.get(key, default or "")
+    reader.get_preset = lambda key, default="": presets.get(key, default)
+
+    result = reader.compute_shard("dxfund")
+
+    assert result["env_name"] == "gyyh-auto"
+    assert result["db_name"] == "GYYHAUTO"
+    assert result["routing_db"] == "GYYHAUTO"
+    assert result["db_type"] == "oracle"
+    assert result["formula"] == "single_db(GYYHAUTO)"
+
+
 def test_presets_can_be_derived_from_chinese_fields_without_field_key_column(tmp_path):
     module = _load_config_reader_module()
     workbook = Workbook()

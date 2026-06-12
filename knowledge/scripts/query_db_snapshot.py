@@ -23,6 +23,9 @@ import dry_run_sql  # noqa: E402
 
 
 def connect_db(db_cfg: dict):
+    if str(db_cfg.get('db_type') or 'mysql').lower() == 'oracle':
+        return dry_run_sql._connect(db_cfg)
+
     import pymysql
     return pymysql.connect(
         host=db_cfg['host'],

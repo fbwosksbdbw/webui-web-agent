@@ -11,11 +11,13 @@ def _load_cdp_executor(path: Path):
 
 
 def _cdp_paths():
-    root = Path(__file__).resolve().parents[2]
-    return [
-        root / "scripts" / "cdp_executor.py",
-        root / "hui-playwright-agent" / "knowledge" / "scripts" / "cdp_executor.py",
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        repo_root / "knowledge" / "scripts" / "cdp_executor.py",
+        repo_root.parent / "scripts" / "cdp_executor.py",
+        repo_root.parent / "hui-playwright-agent" / "knowledge" / "scripts" / "cdp_executor.py",
     ]
+    return [path for path in candidates if path.exists()]
 
 
 def test_dropdown_matcher_rejects_pagination_text_and_requires_exact_code_or_label():

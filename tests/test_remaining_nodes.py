@@ -50,6 +50,16 @@ def test_preset_sql_dry_run_uses_routing_db_when_shard_db_is_base_db():
     assert _sql_dry_run_db_key("preset_sql", case_plan) == "ui_fund2"
 
 
+def test_sql_dry_run_uses_single_db_key_for_base_and_preset_sql():
+    case_plan = {
+        "env": {"single_db_key": "GYYHAUTO"},
+        "shard": {"db": "ui_bc", "routing_db": "ui_fund2"},
+    }
+
+    assert _sql_dry_run_db_key("base_sql", case_plan) == "GYYHAUTO"
+    assert _sql_dry_run_db_key("preset_sql", case_plan) == "GYYHAUTO"
+
+
 def test_collect_table_schemas_uses_explicit_skill_root(tmp_path, monkeypatch):
     skill = tmp_path / "installed_skill"
     _write_schema_cache(
