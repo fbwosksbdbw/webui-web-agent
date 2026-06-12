@@ -39,6 +39,17 @@ def connect_db(db_cfg: dict):
     )
 
 
+def _connection_db_type(conn) -> str:
+    return str(getattr(conn, '_hui_db_type', 'mysql') or 'mysql').lower()
+
+
+def _table_ref(table: str, db_type: str) -> str:
+    normalized = _normalize_table_name(table)
+    if db_type == 'oracle':
+        return normalized
+    return f'`{normalized}`'
+
+
 def get_db_config(config_path: str, db_key: str, env_override: str | None = None) -> dict:
     """从自动化项目 conf/config.py 读取数据库连接配置。"""
     try:
@@ -93,15 +104,26 @@ def _normalize_table_name(raw_table: str) -> str:
 def query_table_snapshot(conn, table: str, limit: int = 5) -> dict:
     """查询表的前 N 行数据。"""
     try:
+        db_type = _connection_db_type(conn)
+        table_ref = _table_ref(table, db_type)
         cursor = conn.cursor()
-        cursor.execute(f'SELECT * FROM `{table}` LIMIT {limit}')
+        if db_type == 'oracle':
+            cursor.execute(f'SELECT * FROM {table_ref} FETCH FIRST {limit} ROWS ONLY')
+        else:
+            cursor.execute(f'SELECT * FROM {table_ref} LIMIT {limit}')
         rows = cursor.fetchall()
+        column_names = [
+            str(item[0]).lower()
+            for item in getattr(cursor, 'description', []) or []
+            if item
+        ]
         cursor.close()
         # Convert non-serializable types to strings
         serializable_rows = []
         for row in rows:
+            row_items = row.items() if isinstance(row, dict) else zip(column_names, row)
             serializable_row = {}
-            for k, v in row.items():
+            for k, v in row_items:
                 if isinstance(v, (bytes, bytearray)):
                     serializable_row[k] = v.decode('utf-8', errors='replace')
                 elif isinstance(v, Decimal):
@@ -119,11 +141,22 @@ def query_table_snapshot(conn, table: str, limit: int = 5) -> dict:
 def query_table_count(conn, table: str) -> dict:
     """查询表的总行数。"""
     try:
+        db_type = _connection_db_type(conn)
+        table_ref = _table_ref(table, db_type)
         cursor = conn.cursor()
-        cursor.execute(f'SELECT COUNT(*) as cnt FROM `{table}`')
+        if db_type == 'oracle':
+            cursor.execute(f'SELECT COUNT(*) cnt FROM {table_ref}')
+        else:
+            cursor.execute(f'SELECT COUNT(*) as cnt FROM {table_ref}')
         result = cursor.fetchone()
         cursor.close()
-        return {"table": table, "total_rows": result['cnt'] if result else 0}
+        if isinstance(result, dict):
+            total = result.get('cnt', result.get('CNT', 0))
+        elif isinstance(result, (list, tuple)):
+            total = result[0] if result else 0
+        else:
+            total = result or 0
+        return {"table": table, "total_rows": total}
     except Exception as e:
         return {"table": table, "error": str(e)}
 

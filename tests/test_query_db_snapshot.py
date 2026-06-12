@@ -89,3 +89,57 @@ def test_snapshot_connect_db_reuses_dry_run_oracle_connection(monkeypatch):
 
     assert conn is not None
     assert calls["db_cfg"] == {"db_type": "oracle", "database": "GYYHAUTO"}
+
+
+def test_oracle_snapshot_uses_fetch_first_and_tuple_rows():
+    module = _load_query_db_snapshot()
+    executed = []
+
+    class Cursor:
+        description = [("AMOUNT",)]
+
+        def execute(self, sql):
+            executed.append(sql)
+
+        def fetchall(self):
+            return [(Decimal("12.30"),)]
+
+        def close(self):
+            pass
+
+    class Connection:
+        _hui_db_type = "oracle"
+
+        def cursor(self):
+            return Cursor()
+
+    snapshot = module.query_table_snapshot(Connection(), "biztable", limit=3)
+
+    assert executed == ["SELECT * FROM biztable FETCH FIRST 3 ROWS ONLY"]
+    assert snapshot["rows"] == [{"amount": "12.30"}]
+
+
+def test_oracle_count_uses_unquoted_table_and_tuple_count():
+    module = _load_query_db_snapshot()
+    executed = []
+
+    class Cursor:
+        def execute(self, sql):
+            executed.append(sql)
+
+        def fetchone(self):
+            return (7,)
+
+        def close(self):
+            pass
+
+    class Connection:
+        _hui_db_type = "oracle"
+
+        def cursor(self):
+            return Cursor()
+
+    count = module.query_table_count(Connection(), "biztable")
+
+    assert executed == ["SELECT COUNT(*) cnt FROM biztable"]
+    assert count == {"table": "biztable", "total_rows": 7}

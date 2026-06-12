@@ -435,6 +435,64 @@ def _get_db_config_for_classify(env_name: str = 'ifm60-trust', project_dir: str 
     return db_config['common'], db_config['databases']
 
 
+def _db_type(common: dict, db_info: dict) -> str:
+    return str(db_info.get('db_type') or common.get('db_type') or 'mysql').lower()
+
+
+def _connect_configured_db(common: dict, db_info: dict, db_name: str):
+    db_type = _db_type(common, db_info)
+    if db_type == 'oracle':
+        try:
+            import oracledb
+        except ImportError:
+            raise ImportError("请安装 oracledb: pip install oracledb")
+        database = db_info.get('database', db_name)
+        dsn = db_info.get('dsn') or f"{common['host']}:{common.get('port', 1521)}/{database}"
+        conn = oracledb.connect(user=db_info['user'], password=db_info['password'], dsn=dsn)
+        try:
+            conn._hui_db_type = db_type
+        except Exception:
+            pass
+        return conn
+
+    import pymysql
+    conn = pymysql.connect(
+        host=common['host'], port=common['port'],
+        user=db_info['user'], password=db_info['password'],
+        database=db_info.get('database', db_name),
+        autocommit=True,
+    )
+    try:
+        conn._hui_db_type = db_type
+    except Exception:
+        pass
+    return conn
+
+
+def _fetch_table_catalog_row(cur, db_type: str, database: str, table_name: str):
+    if db_type == 'oracle':
+        cur.execute(
+            """
+            SELECT table_name, 'BASE TABLE' AS table_type
+            FROM USER_TABLES
+            WHERE table_name = :table_name
+            UNION ALL
+            SELECT view_name, 'VIEW' AS table_type
+            FROM USER_VIEWS
+            WHERE view_name = :table_name
+            """,
+            {"table_name": _oracle_identifier(table_name)},
+        )
+        return cur.fetchone()
+
+    cur.execute(
+        "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
+        (database, table_name),
+    )
+    return cur.fetchone()
+
+
 def _resolve_actual_db(db_family: str, databases: dict) -> str:
     """将 db 族名（如 ui_trust）解析为 config 中实际存在的 key（如 ui_trust2）。"""
     if db_family in databases:
@@ -463,7 +521,6 @@ def classify_tables(physical_tables: dict, routing_db: str = None,
             "reason": "分类原因"
         }, ...}
     """
-    import pymysql
     # 兼容 list 格式：["table1", "table2"] → {"table1": ["table1"], "table2": ["table2"]}
     if isinstance(physical_tables, list):
         physical_tables = {t: [t] for t in physical_tables}
@@ -509,12 +566,8 @@ def classify_tables(physical_tables: dict, routing_db: str = None,
 
         db_info = databases[db_name]
         try:
-            conn = pymysql.connect(
-                host=common['host'], port=common['port'],
-                user=db_info['user'], password=db_info['password'],
-                database=db_info.get('database', db_name),
-                autocommit=True,
-            )
+            db_type = _db_type(common, db_info)
+            conn = _connect_configured_db(common, db_info, db_name)
             cur = conn.cursor()
 
             for logical_name in table_names:
@@ -537,12 +590,7 @@ def classify_tables(physical_tables: dict, routing_db: str = None,
                 check_name = phys_names[0] if phys_names else logical_name
                 db_database = db_info.get('database', db_name)
 
-                cur.execute(
-                    "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES "
-                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
-                    (db_database, check_name),
-                )
-                row = cur.fetchone()
+                row = _fetch_table_catalog_row(cur, db_type, db_database, check_name)
 
                 if row is None:
                     # 多库表：在一个库未找到不一定是错误，继续检查其他库
@@ -581,6 +629,10 @@ def classify_tables(physical_tables: dict, routing_db: str = None,
                             'reason': '业务表 → DELETE + INSERT (.sql)',
                         }
 
+            try:
+                cur.close()
+            except Exception:
+                pass
             conn.close()
         except Exception as exc:
             for t in table_names:
@@ -598,6 +650,93 @@ def classify_tables(physical_tables: dict, routing_db: str = None,
 
     result = classified
     return result
+
+
+def describe_table_columns(table_name: str, db_name: str, env_name: str = None, project_dir: str = None) -> list[dict]:
+    """读取表字段并返回 DESCRIBE 兼容结构。"""
+    common, databases = _get_db_config_for_classify(env_name or 'ifm60-trust', project_dir)
+    actual_db = _resolve_actual_db(db_name, databases)
+    if actual_db not in databases:
+        raise ValueError(f"数据库 {db_name} 不在配置中（可用: {list(databases.keys())}）")
+
+    db_info = databases[actual_db]
+    db_type = _db_type(common, db_info)
+    conn = _connect_configured_db(common, db_info, actual_db)
+    cur = conn.cursor()
+    try:
+        if db_type == 'oracle':
+            cur.execute(
+                """
+                SELECT column_name, data_type, data_length, data_precision, data_scale, nullable, data_default
+                FROM USER_TAB_COLUMNS
+                WHERE table_name = :table_name
+                ORDER BY column_id
+                """,
+                {"table_name": _oracle_identifier(table_name)},
+            )
+            rows = cur.fetchall()
+            return [_oracle_describe_row(row) for row in rows if _row_value(row, 'COLUMN_NAME', 0)]
+
+        cur.execute(f'DESCRIBE `{table_name}`')
+        rows = cur.fetchall()
+        return [
+            {
+                'Field': row[0],
+                'Type': row[1],
+                'Null': row[2],
+                'Key': row[3],
+                'Default': row[4],
+                'Extra': row[5],
+            }
+            for row in rows
+        ]
+    finally:
+        try:
+            cur.close()
+        finally:
+            conn.close()
+
+
+def _oracle_describe_row(row) -> dict:
+    return {
+        "Field": _cache_identifier(_row_value(row, 'COLUMN_NAME', 0)),
+        "Type": _oracle_column_type(row),
+        "Null": "YES" if str(_row_value(row, 'NULLABLE', 5) or '').upper() == 'Y' else "NO",
+        "Key": "",
+        "Default": _row_value(row, 'DATA_DEFAULT', 6),
+        "Extra": "",
+    }
+
+
+def _oracle_column_type(row) -> str:
+    data_type = str(_row_value(row, 'DATA_TYPE', 1) or '').lower()
+    data_length = _row_value(row, 'DATA_LENGTH', 2)
+    data_precision = _row_value(row, 'DATA_PRECISION', 3)
+    data_scale = _row_value(row, 'DATA_SCALE', 4)
+    if data_type in ('varchar2', 'nvarchar2', 'char', 'nchar', 'raw') and data_length:
+        return f"{data_type}({data_length})"
+    if data_type == 'number':
+        if data_precision is not None and data_scale is not None:
+            return f"number({data_precision},{data_scale})"
+        if data_precision is not None:
+            return f"number({data_precision})"
+    return data_type
+
+
+def _row_value(row, key: str, index: int):
+    if isinstance(row, dict):
+        return row.get(key) if key in row else row.get(key.lower())
+    if isinstance(row, (list, tuple)) and len(row) > index:
+        return row[index]
+    return None
+
+
+def _oracle_identifier(name: str) -> str:
+    return str(name or '').strip().strip('"').upper()
+
+
+def _cache_identifier(name: str) -> str:
+    return str(name or '').strip().strip('"').lower()
 
 
 def _is_system_table(table_name: str) -> bool:
@@ -2923,7 +3062,6 @@ def main():
             print("用法: python sql_extractor.py describe <表名> --db <数据库> [--env ENV] [--project-dir DIR]")
             sys.exit(1)
         table_name = sys.argv[2]
-        import pymysql
         db_name = None
         env_name = None
         project_dir = None
@@ -2941,40 +3079,14 @@ def main():
             print("错误: 需要 --db 参数指定数据库名")
             sys.exit(1)
 
-        common, databases = _get_db_config_for_classify(env_name or 'ifm60-trust', project_dir)
-        actual_db = _resolve_actual_db(db_name, databases)
-        if actual_db not in databases:
-            print(f"错误: 数据库 {db_name} 不在配置中（可用: {list(databases.keys())}）")
-            sys.exit(1)
-
-        db_info = databases[actual_db]
         try:
-            conn = pymysql.connect(
-                host=common['host'], port=common['port'],
-                user=db_info['user'], password=db_info['password'],
-                database=db_info.get('database', actual_db),
-                autocommit=True,
-            )
-            cur = conn.cursor()
-            cur.execute(f'DESCRIBE `{table_name}`')
-            rows = cur.fetchall()
-            cur.close()
-            conn.close()
+            common, databases = _get_db_config_for_classify(env_name or 'ifm60-trust', project_dir)
+            actual_db = _resolve_actual_db(db_name, databases)
+            columns = describe_table_columns(table_name, db_name, env_name=env_name, project_dir=project_dir)
         except Exception as e:
-            print(json.dumps({'error': str(e), 'table': table_name, 'db': actual_db}, ensure_ascii=False))
+            print(json.dumps({'error': str(e), 'table': table_name, 'db': db_name}, ensure_ascii=False))
             sys.exit(1)
 
-        columns = []
-        for row in rows:
-            col_info = {
-                'Field': row[0],
-                'Type': row[1],
-                'Null': row[2],
-                'Key': row[3],
-                'Default': row[4],
-                'Extra': row[5],
-            }
-            columns.append(col_info)
         print(json.dumps({'table': table_name, 'db': actual_db, 'columns': columns, 'count': len(columns)},
                          ensure_ascii=False, indent=2, default=str))
 

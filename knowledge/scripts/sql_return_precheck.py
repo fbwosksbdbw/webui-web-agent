@@ -81,6 +81,7 @@ def run_precheck(case_plan_path: Path, config_path: Path, db_key: str, env_overr
             "failure_reason": f"database connection failed: {exc}",
             "checks": [],
         }
+    db_type = str(db_cfg.get("db_type") or getattr(conn, "_hui_db_type", "mysql") or "mysql").lower()
 
     cursor = conn.cursor()
     base_cursor = cursor
@@ -88,9 +89,10 @@ def run_precheck(case_plan_path: Path, config_path: Path, db_key: str, env_overr
     permission_checks: dict = {}
     try:
         if sql_file_map.get("base_sql"):
-            _execute_preset_dml(base_cursor, sql_file_map["base_sql"], default_db="ui_bc")
+            base_default_db = "" if _is_single_db_case(case_plan) or db_type == "oracle" else "ui_bc"
+            _execute_preset_dml(base_cursor, sql_file_map["base_sql"], default_db=base_default_db, db_type=db_type)
         if sql_file_map.get("preset_sql"):
-            _execute_preset_dml(cursor, sql_file_map["preset_sql"])
+            _execute_preset_dml(cursor, sql_file_map["preset_sql"], db_type=db_type)
         qualified_sqls = [_qualify_cross_db_tables(raw_sql, case_plan) for raw_sql in raw_sqls]
         for index, raw_sql in enumerate(qualified_sqls, start=1):
             count_sql, skip_reason = _count_sql(raw_sql)
@@ -244,6 +246,9 @@ def _cursor_for_raw_sql(raw_sql: str, case_plan: dict, primary_cursor, base_curs
 
 
 def _qualify_cross_db_tables(raw_sql: str, case_plan: dict) -> str:
+    if _is_single_db_case(case_plan):
+        return raw_sql
+
     base_tables = _public_precheck_tables(case_plan)
     if not base_tables:
         return raw_sql
@@ -293,6 +298,11 @@ def _public_precheck_tables(case_plan: dict) -> set[str]:
         if dbs and set(dbs) <= {"ui_bc"}:
             public_tables.add(normalized)
     return {table for table in public_tables if table}
+
+
+def _is_single_db_case(case_plan: dict) -> bool:
+    env = case_plan.get("env", {}) if isinstance(case_plan.get("env"), dict) else {}
+    return bool(str(env.get("single_db_key") or case_plan.get("single_db_key") or "").strip())
 
 
 def _load_table_db_mapping() -> dict[str, list[str]]:
@@ -494,9 +504,11 @@ def _normalize_table_name(raw_table: str) -> str:
     return parts[-1] if parts else ""
 
 
-def _execute_preset_dml(cursor, sql_files: list[Path], default_db: str = "") -> None:
-    cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
-    cursor.execute("START TRANSACTION")
+def _execute_preset_dml(cursor, sql_files: list[Path], default_db: str = "", db_type: str = "mysql") -> None:
+    use_mysql_session_commands = str(db_type or "mysql").lower() == "mysql"
+    if use_mysql_session_commands:
+        cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
+        cursor.execute("START TRANSACTION")
     for sql_file in sql_files:
         statements = dry_run_sql.parse_statements(sql_file.read_text(encoding="utf-8", errors="replace"))
         for stmt, _line in statements:

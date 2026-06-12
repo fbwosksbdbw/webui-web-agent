@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 
@@ -114,3 +115,96 @@ def test_workflow_engine_tables_are_classified_as_system():
     ):
         result = sql_extractor._classify_by_name_rules(table)
         assert result["classification"] == "system"
+
+
+def test_classify_tables_uses_oracle_catalog(monkeypatch):
+    sql_extractor = _load_sql_extractor()
+
+    class Cursor:
+        def execute(self, sql, params=None):
+            self.sql = sql
+            self.params = params
+
+        def fetchone(self):
+            return ("BIZTABLE", "BASE TABLE")
+
+        def close(self):
+            pass
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    class Config:
+        env_dbs = {
+            "gyyh-auto": {
+                "common": {"host": "10.20.27.108", "port": 1521, "db_type": "oracle"},
+                "databases": {
+                    "GYYHAUTO": {"user": "gyyhauto", "password": "handsome", "database": "GYYHAUTO"}
+                },
+            }
+        }
+
+        @staticmethod
+        def get_db_config(_env):
+            return Config.env_dbs["gyyh-auto"]
+
+    fake_config_module = types.ModuleType("conf.config")
+    fake_config_module.Config = Config
+    monkeypatch.setitem(sys.modules, "conf", types.ModuleType("conf"))
+    monkeypatch.setitem(sys.modules, "conf.config", fake_config_module)
+    monkeypatch.setitem(sys.modules, "oracledb", types.SimpleNamespace(connect=lambda **_kwargs: Connection()))
+    monkeypatch.setattr(sql_extractor, "resolve_shard_dbs", lambda *_args, **_kwargs: ["GYYHAUTO"])
+    monkeypatch.setattr(sql_extractor, "table_to_db", lambda _table: "GYYHAUTO")
+
+    result = sql_extractor.classify_tables({"biztable": ["BIZTABLE"]}, routing_db="GYYHAUTO", env_name="gyyh-auto")
+
+    assert result["biztable"]["type"] == "BASE TABLE"
+    assert result["biztable"]["classification"] == "business"
+    assert result["biztable"]["db"] == "GYYHAUTO"
+
+
+def test_describe_table_columns_uses_oracle_catalog(monkeypatch):
+    sql_extractor = _load_sql_extractor()
+
+    class Cursor:
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            return [("CUSTOMER_ID", "VARCHAR2", 32, None, None, "N", None)]
+
+        def close(self):
+            pass
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    class Config:
+        @staticmethod
+        def get_db_config(_env):
+            return {
+                "common": {"host": "10.20.27.108", "port": 1521, "db_type": "oracle"},
+                "databases": {
+                    "GYYHAUTO": {"user": "gyyhauto", "password": "handsome", "database": "GYYHAUTO"}
+                },
+            }
+
+    fake_config_module = types.ModuleType("conf.config")
+    fake_config_module.Config = Config
+    monkeypatch.setitem(sys.modules, "conf", types.ModuleType("conf"))
+    monkeypatch.setitem(sys.modules, "conf.config", fake_config_module)
+    monkeypatch.setitem(sys.modules, "oracledb", types.SimpleNamespace(connect=lambda **_kwargs: Connection()))
+
+    columns = sql_extractor.describe_table_columns("tb_customer", "GYYHAUTO", env_name="gyyh-auto")
+
+    assert columns == [
+        {"Field": "customer_id", "Type": "varchar2(32)", "Null": "NO", "Key": "", "Default": None, "Extra": ""}
+    ]

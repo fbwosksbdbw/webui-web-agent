@@ -497,6 +497,43 @@ def test_return_precheck_qualifies_base_join_tables_for_business_sql():
     assert ", ui_bc.tbtainfo b" in qualified
 
 
+def test_return_precheck_does_not_qualify_base_tables_for_single_db():
+    module = _load_sql_return_precheck()
+    case_plan = {
+        "env": {"single_db_key": "GYYHAUTO"},
+        "preset_strategy": {
+            "base_tables": ["tbclientmap"],
+            "biz_tables": ["biztable"],
+        },
+    }
+    sql = "select * from biztable b join tbclientmap c on b.bank_acc=c.bank_acc"
+
+    qualified = module._qualify_cross_db_tables(sql, case_plan)
+
+    assert qualified == sql
+
+
+def test_execute_preset_dml_oracle_skips_mysql_session_commands(tmp_path):
+    module = _load_sql_return_precheck()
+    sql_file = tmp_path / "preset.sql"
+    sql_file.write_text(
+        "DELETE FROM biztable WHERE id='1';\nINSERT INTO biztable(id) VALUES('1');\n",
+        encoding="utf-8",
+    )
+    executed = []
+
+    class Cursor:
+        def execute(self, sql):
+            executed.append(sql)
+
+    module._execute_preset_dml(Cursor(), [sql_file], db_type="oracle")
+
+    assert executed == [
+        "DELETE FROM biztable WHERE id='1'",
+        "INSERT INTO biztable(id) VALUES('1')",
+    ]
+
+
 def test_candidate_selects_skip_system_table_queries_before_limiting():
     module = _load_sql_return_precheck()
     case_plan = {
