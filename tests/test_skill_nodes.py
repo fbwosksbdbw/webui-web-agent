@@ -38,7 +38,13 @@ def test_menu_init_writes_minimal_case_plan(tmp_path):
     case_dir = tmp_path / "case"
     config_path = case_dir / "config.json"
     config = {
-        "env": {"owner": "owner1"},
+        "env": {
+            "owner": "owner1",
+            "env_key": "gyyh-auto",
+            "single_db_key": "GYYHAUTO",
+            "db_type": "oracle",
+            "project_dir": "F:/project",
+        },
         "menu": {"菜单名称": "菜单A", "导航一级菜单": "一级", "导航二级菜单": "二级"},
         "computed": {"menu_url": "/menu/a", "module": "dxtrust", "func_code": "FUNC_A"},
         "field_groups": [{"name": "客户标识组", "fields": ["客户标识类型", "客户标识"]}],
@@ -58,7 +64,10 @@ def test_menu_init_writes_minimal_case_plan(tmp_path):
     assert state.completed_steps == ["0a"]
     assert case_plan["menu"]["name"] == "菜单A"
     assert case_plan["menu"]["code"] == "FUNC_A"
-    assert case_plan["paths"]["project_dir"] == ""
+    assert case_plan["env"]["single_db_key"] == "GYYHAUTO"
+    assert case_plan["env"]["db_type"] == "oracle"
+    assert case_plan["env_key"] == "gyyh-auto"
+    assert case_plan["paths"]["project_dir"] == "F:/project"
     assert case_plan["field_groups"][0]["name"] == "客户标识组"
 
 

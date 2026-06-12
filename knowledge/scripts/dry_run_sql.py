@@ -172,6 +172,7 @@ def _load_db_config(config_json_path: str, db_key: str, env_override: str = None
     # 从项目 conf/config.py 读取数据库配置
     if project_dir not in sys.path:
         sys.path.insert(0, project_dir)
+    _drop_stale_project_config_modules(project_dir)
 
     try:
         from conf.config import Config
@@ -208,6 +209,17 @@ def _load_db_config(config_json_path: str, db_key: str, env_override: str = None
         'charset': 'utf8mb4',
         'autocommit': common.get('autocommit', True),
     }
+
+
+def _drop_stale_project_config_modules(project_dir: str) -> None:
+    project_root = os.path.abspath(project_dir)
+    for module_name in ('conf.config', 'conf'):
+        module = sys.modules.get(module_name)
+        if not module:
+            continue
+        module_file = getattr(module, '__file__', '')
+        if not module_file or not os.path.abspath(module_file).startswith(project_root):
+            sys.modules.pop(module_name, None)
 
 
 def _connect(db_cfg: dict):

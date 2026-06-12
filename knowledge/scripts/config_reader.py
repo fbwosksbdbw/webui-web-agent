@@ -555,7 +555,7 @@ PRESET_SQL_BASE = os.path.join(
 
         # 从 conf/config.py 的 TEST_CASE_DIRS 查表
         test_case_rel = ''
-        env_key = ''
+        env_key = self.get_env('env_key', '')
         project_root = project_dir
         if level1:
             if not project_dir.startswith('<') and '请配置' not in project_dir:
@@ -565,7 +565,8 @@ PRESET_SQL_BASE = os.path.join(
             sys.path.insert(0, project_root)
             from conf.config import Config
             test_case_rel = Config.TEST_CASE_DIRS.get(level1, '')
-            env_key = resolve_env(module, project_root)
+            if not env_key:
+                env_key = resolve_env(module, project_root)
 
         # 存完整绝对路径，step 文档直接用 {test_case_dir} 无需再拼接
         test_case_dir = os.path.join(project_root, test_case_rel)   # Full absolute path

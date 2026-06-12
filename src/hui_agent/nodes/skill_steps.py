@@ -987,6 +987,7 @@ def _write_initial_case_plan(config_path: Path, case_plan_path: Path) -> None:
     payload = {
         "owner": _menu_owner(menu, env),
         "env_key": env.get("env_key", ""),
+        "env": env,
         "menu": {
             "name": menu.get("菜单名称", ""),
             "code": func_code,
@@ -1032,7 +1033,12 @@ def _merge_config_env_into_case_plan(case_plan: dict, config_path: Path | None) 
     if not config_path or not config_path.exists():
         return
     config = _load_json(config_path)
-    env_key = str(config.get("env", {}).get("env_key") or "").strip()
+    env = config.get("env", {}) if isinstance(config.get("env"), dict) else {}
+    if env:
+        merged_env = case_plan.get("env", {}) if isinstance(case_plan.get("env"), dict) else {}
+        merged_env.update(env)
+        case_plan["env"] = merged_env
+    env_key = str(env.get("env_key") or "").strip()
     if env_key:
         case_plan["env_key"] = env_key
 

@@ -1112,7 +1112,7 @@ def test_case_generate_writes_pytest_files_from_case_inputs(tmp_path):
     case_dir = tmp_path / "case"
     case_dir.mkdir()
     (case_dir / "config.json").write_text(
-        json.dumps({"env": {"owner": "owner1", "env_key": "ifm60-dxfund"}}),
+        json.dumps({"env": {"owner": "owner1", "env_key": "gyyh-auto", "single_db_key": "GYYHAUTO", "db_type": "oracle"}}),
         encoding="utf-8",
     )
     (case_dir / "case_plan.json").write_text(
@@ -1143,9 +1143,12 @@ def test_case_generate_writes_pytest_files_from_case_inputs(tmp_path):
     assert len(generated) == 1
     generated_code = generated[0].read_text(encoding="utf-8")
     assert '_fill_input_by_label(page, "客户标识", "A1")' in generated_code
-    assert 'DB_ENV_NAME = "ifm60-dxfund"' in generated_code
     case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
-    assert case_plan["env_key"] == "ifm60-dxfund"
+    assert 'DB_ENV_NAME = "gyyh-auto"' in generated_code
+    assert 'DB_KEY = "GYYHAUTO"' in generated_code
+    assert 'DB_TYPE = "oracle"' in generated_code
+    assert case_plan["env_key"] == "gyyh-auto"
+    assert case_plan["env"]["single_db_key"] == "GYYHAUTO"
 
 
 def test_case_generate_reconciles_case_inputs_from_final_insert_plan_values(tmp_path):

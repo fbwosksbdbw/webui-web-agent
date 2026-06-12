@@ -188,3 +188,42 @@ def test_presets_can_be_derived_from_chinese_fields_without_field_key_column(tmp
         "name": "客户标识",
         "value": "A33060210021113",
     }
+
+
+def test_init_menu_prefers_excel_env_key_for_single_db_environment(tmp_path):
+    module = _load_config_reader_module()
+    project = tmp_path / "project"
+    (project / "conf").mkdir(parents=True)
+    (project / "conf" / "__init__.py").write_text("", encoding="utf-8")
+    (project / "conf" / "config.py").write_text(
+        "class Config:\n"
+        "    TEST_CASE_DIRS = {'信托代销': 'tests_out'}\n"
+        "    env_dbs = {}\n",
+        encoding="utf-8",
+    )
+
+    workbook = Workbook()
+    env = workbook.active
+    env.title = "环境配置"
+    env.append(["配置项", "配置值", "说明"])
+    env.append(["project_dir", str(project), ""])
+    env.append(["env_key", "gyyh-auto", ""])
+    env.append(["single_db_key", "GYYHAUTO", ""])
+    env.append(["db_type", "oracle", ""])
+    env.append(["log_path_module_keywords", "信托:dxtrust", ""])
+    menus = workbook.create_sheet("菜单导入")
+    menus.append(["状态", "菜单名称", "导航一级菜单", "导航二级菜单", "导航三级菜单", "菜单URL"])
+    menus.append(["未完成", "菜单A", "信托代销", "查询管理", "菜单A", "/menu/FUNC_A"])
+    presets = workbook.create_sheet("预埋数据")
+    presets.append(["字段名", "默认值", "说明", "适用模块"])
+    presets.append(["客户标识", "A33060210021113", "", "公共"])
+    config_path = tmp_path / "test_config.xlsx"
+    workbook.save(config_path)
+
+    reader = module.ConfigReader(config_path)
+
+    result = reader.init_menu("菜单A")
+
+    assert result["env_key"] == "gyyh-auto"
+    assert result["env"]["single_db_key"] == "GYYHAUTO"
+    assert result["env"]["db_type"] == "oracle"
