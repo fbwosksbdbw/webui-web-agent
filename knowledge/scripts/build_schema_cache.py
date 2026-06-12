@@ -116,7 +116,6 @@ def get_db_connection(db_name: str, env_key: str = None):
         env_key: 环境标识（如 ifm60-trust）。为 None 时自动搜索所有环境。
     """
     try:
-        import pymysql
         from conf.config import Config
 
         if env_key:
@@ -128,32 +127,69 @@ def get_db_connection(db_name: str, env_key: str = None):
             db_cfg = env_db['databases'].get(db_name, {})
             if not db_cfg:
                 return None
-            return pymysql.connect(
-                host=common['host'], port=common['port'],
-                user=db_cfg['user'], password=db_cfg['password'],
-                database=db_cfg.get('database', db_name),
-                charset='utf8mb4'
-            )
+            return _connect_configured_db(common, db_cfg, db_name)
         else:
             # 自动搜索所有环境
             for env_name, env_db in Config.env_dbs.items():
                 common = env_db.get('common', {})
                 db_cfg = env_db.get('databases', {}).get(db_name, {})
                 if db_cfg:
-                    return pymysql.connect(
-                        host=common['host'], port=common['port'],
-                        user=db_cfg['user'], password=db_cfg['password'],
-                        database=db_cfg.get('database', db_name),
-                        charset='utf8mb4'
-                    )
+                    return _connect_configured_db(common, db_cfg, db_name)
             return None
     except Exception as e:
         print(f"  连接 {db_name} 失败: {e}")
         return None
 
 
+def _connect_configured_db(common: dict, db_cfg: dict, db_name: str):
+    db_type = str(db_cfg.get('db_type') or common.get('db_type') or 'mysql').lower()
+    if db_type == 'oracle':
+        try:
+            import oracledb
+        except ImportError:
+            raise ImportError("请安装 oracledb: pip install oracledb")
+
+        database = db_cfg.get('database', db_name)
+        dsn = db_cfg.get('dsn') or f"{common['host']}:{common.get('port', 1521)}/{database}"
+        conn = oracledb.connect(
+            user=db_cfg['user'],
+            password=db_cfg['password'],
+            dsn=dsn,
+        )
+        _set_connection_db_type(conn, db_type)
+        return conn
+
+    try:
+        import pymysql
+    except ImportError:
+        raise ImportError("请安装 pymysql: pip install pymysql")
+
+    conn = pymysql.connect(
+        host=common['host'], port=common['port'],
+        user=db_cfg['user'], password=db_cfg['password'],
+        database=db_cfg.get('database', db_name),
+        charset='utf8mb4'
+    )
+    _set_connection_db_type(conn, db_type)
+    return conn
+
+
+def _set_connection_db_type(conn, db_type: str) -> None:
+    try:
+        conn._hui_db_type = db_type
+    except Exception:
+        pass
+
+
+def _connection_db_type(conn) -> str:
+    return str(getattr(conn, '_hui_db_type', 'mysql') or 'mysql').lower()
+
+
 def describe_table(conn, table_name: str) -> list:
     """执行 DESCRIBE 并返回行列表"""
+    if _connection_db_type(conn) == 'oracle':
+        return _describe_oracle_table(conn, table_name)
+
     cursor = conn.cursor()
     cursor.execute(f'DESCRIBE `{table_name}`')
     rows = cursor.fetchall()
@@ -161,20 +197,154 @@ def describe_table(conn, table_name: str) -> list:
     return rows
 
 
+def _describe_oracle_table(conn, table_name: str) -> list:
+    oracle_table = _oracle_identifier(table_name)
+    primary_keys = set(_oracle_primary_key_columns(conn, oracle_table))
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT column_name, data_type, data_length, data_precision, data_scale, nullable, data_default
+            FROM USER_TAB_COLUMNS
+            WHERE table_name = :table_name
+            ORDER BY column_id
+            """,
+            {"table_name": oracle_table},
+        )
+        rows = cursor.fetchall()
+    finally:
+        cursor.close()
+
+    result = []
+    for row in rows:
+        column_name = _row_value(row, 'COLUMN_NAME', 0)
+        if not column_name:
+            continue
+        normalized = _cache_identifier(column_name)
+        result.append({
+            "Field": normalized,
+            "Type": _oracle_column_type(row),
+            "Null": "YES" if str(_row_value(row, 'NULLABLE', 5) or '').upper() == 'Y' else "NO",
+            "Key": "PRI" if normalized in primary_keys else "",
+            "Default": _row_value(row, 'DATA_DEFAULT', 6),
+            "Extra": "",
+        })
+    return result
+
+
+def _oracle_primary_key_columns(conn, table_name: str) -> list:
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT cols.column_name
+            FROM USER_CONSTRAINTS cons
+            JOIN USER_CONS_COLUMNS cols
+              ON cons.constraint_name = cols.constraint_name
+             AND cons.table_name = cols.table_name
+            WHERE cons.constraint_type = 'P'
+              AND cons.table_name = :table_name
+            ORDER BY cols.position
+            """,
+            {"table_name": table_name},
+        )
+        return [_cache_identifier(_row_value(row, 'COLUMN_NAME', 0)) for row in cursor.fetchall()]
+    finally:
+        cursor.close()
+
+
+def describe_unique_indexes(conn, table_name: str) -> list:
+    """返回唯一约束/主键约束，格式兼容 sql_extractor 的 unique_indexes。"""
+    if _connection_db_type(conn) != 'oracle':
+        return []
+
+    oracle_table = _oracle_identifier(table_name)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT cons.constraint_name, cols.column_name
+            FROM USER_CONSTRAINTS cons
+            JOIN USER_CONS_COLUMNS cols
+              ON cons.constraint_name = cols.constraint_name
+             AND cons.table_name = cols.table_name
+            WHERE cons.constraint_type IN ('P', 'U')
+              AND cons.table_name = :table_name
+            ORDER BY cons.constraint_name, cols.position
+            """,
+            {"table_name": oracle_table},
+        )
+        rows = cursor.fetchall()
+    finally:
+        cursor.close()
+
+    grouped = {}
+    for row in rows:
+        name = str(_row_value(row, 'CONSTRAINT_NAME', 0) or '').strip()
+        column = _cache_identifier(_row_value(row, 'COLUMN_NAME', 1))
+        if not name or not column:
+            continue
+        grouped.setdefault(name, []).append(column)
+    return [{"name": name, "columns": columns} for name, columns in grouped.items()]
+
+
+def _oracle_column_type(row) -> str:
+    data_type = str(_row_value(row, 'DATA_TYPE', 1) or '').lower()
+    data_length = _row_value(row, 'DATA_LENGTH', 2)
+    data_precision = _row_value(row, 'DATA_PRECISION', 3)
+    data_scale = _row_value(row, 'DATA_SCALE', 4)
+
+    if data_type in ('varchar2', 'nvarchar2', 'char', 'nchar', 'raw') and data_length:
+        return f"{data_type}({data_length})"
+    if data_type == 'number':
+        if data_precision is not None and data_scale is not None:
+            return f"number({data_precision},{data_scale})"
+        if data_precision is not None:
+            return f"number({data_precision})"
+    return data_type
+
+
+def _row_value(row, key: str, index: int):
+    if isinstance(row, dict):
+        return row.get(key) if key in row else row.get(key.lower())
+    if isinstance(row, (list, tuple)) and len(row) > index:
+        return row[index]
+    return None
+
+
+def _oracle_identifier(name: str) -> str:
+    return str(name or '').strip().strip('"').upper()
+
+
+def _cache_identifier(name: str) -> str:
+    return str(name or '').strip().strip('"').lower()
+
+
 def discover_tables_by_prefix(conn, prefixes: list) -> list:
     """从数据库中发现匹配指定前缀的表"""
+    all_tables = discover_all_tables(conn)
+    matched = []
+    lower_prefixes = [str(prefix).lower() for prefix in prefixes]
+    for table in all_tables:
+        if any(table.startswith(prefix) for prefix in lower_prefixes):
+            matched.append(table)
+    return sorted(matched)
+
+
+def discover_all_tables(conn) -> list:
+    if _connection_db_type(conn) == 'oracle':
+        cursor = conn.cursor()
+        try:
+            cursor.execute('SELECT table_name FROM user_tables')
+            return sorted(_cache_identifier(row[0] if isinstance(row, (list, tuple)) else row.get('TABLE_NAME', '')) for row in cursor.fetchall())
+        finally:
+            cursor.close()
+
     cursor = conn.cursor()
     cursor.execute('SHOW TABLES')
-    all_tables = [row[0] for row in cursor.fetchall()]
+    all_tables = [_cache_identifier(row[0]) for row in cursor.fetchall()]
     cursor.close()
-
-    matched = []
-    for table in all_tables:
-        for prefix in prefixes:
-            if table.startswith(prefix):
-                matched.append(table)
-                break
-    return sorted(matched)
+    return sorted(all_tables)
 
 
 def _base_table_name(table_name: str) -> str:
@@ -185,6 +355,27 @@ def _base_table_name(table_name: str) -> str:
 def _db_family(db_name: str) -> str:
     """去掉数据库名末尾的数字分片后缀。ui_trust1 → ui_trust, ui_bc → ui_bc"""
     return re.sub(r'\d+$', '', db_name)
+
+
+def _ensure_table_db_mapping(table_name: str, db_name: str) -> None:
+    table = _base_table_name(_cache_identifier(table_name))
+    family = _db_family(db_name)
+    if not table or not family:
+        return
+
+    mapping = load_table_db_mapping(force_reload=False)
+    existing = mapping.get(table)
+    if existing is None:
+        mapping[table] = [family]
+        save_table_db_mapping(mapping)
+        return
+
+    if isinstance(existing, str):
+        existing = [existing]
+        mapping[table] = existing
+    if family not in existing:
+        existing.append(family)
+        save_table_db_mapping(mapping)
 
 
 def build_table_db_mapping(db_names: list = None, env_key: str = None):
@@ -210,10 +401,7 @@ def build_table_db_mapping(db_names: list = None, env_key: str = None):
             continue
 
         family = _db_family(db_name)
-        cursor = conn.cursor()
-        cursor.execute('SHOW TABLES')
-        tables = [row[0] for row in cursor.fetchall()]
-        cursor.close()
+        tables = discover_all_tables(conn)
         conn.close()
 
         for table in tables:
@@ -296,6 +484,7 @@ def build_cache(tables_by_db: dict = None, clear: bool = False, auto_discover: b
                 tables = discovered
 
         for table in tables:
+            _ensure_table_db_mapping(table, db_name)
             if table in cache and not clear and not force:
                 print(f"  {table}: 已缓存，跳过")
                 total_skipped += 1
@@ -303,7 +492,8 @@ def build_cache(tables_by_db: dict = None, clear: bool = False, auto_discover: b
 
             try:
                 rows = describe_table(conn, table)
-                result = seed_cache_from_describe(table, rows)
+                unique_indexes = describe_unique_indexes(conn, table)
+                result = seed_cache_from_describe(table, rows, unique_indexes=unique_indexes)
                 print(f"  {table}: {len(result['required_columns'])} 必填列, {len(result['all_columns'])} 总列")
                 total_added += 1
             except Exception as e:
