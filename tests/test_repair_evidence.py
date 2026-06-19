@@ -33,7 +33,34 @@ def test_collect_repair_evidence_includes_pytest_log_sql_and_presets(tmp_path):
         "menu": {"name": "菜单A", "code": "FUNC_A"},
         "presets": {"prd_code": "UI_HT_P001:UI自动化HT信托产品"},
         "sql_paths": {"preset_sql": str(preset_sql)},
-        "repair_attempts": [{"attempt": 1, "status": "no_action"}],
+        "repair_attempts": [
+            {
+                "attempt": 1,
+                "status": "patched",
+                "actions": [{"type": "llm_regenerate_case", "status": "patched", "file": "test_preview.py"}],
+                "restore": {
+                    "status": "restored",
+                    "reason": "target pytest failed",
+                    "files": ["test_preview.py"],
+                    "case_plan_keys": ["insert_plans"],
+                },
+                "diff": {
+                    "files_changed": ["test_preview.py"],
+                    "case_plan_keys_changed": ["insert_plans"],
+                    "file_details": [
+                        {
+                            "file": "test_preview.py",
+                            "old_exists": True,
+                            "new_exists": True,
+                            "old_size": 10,
+                            "new_size": 20,
+                        }
+                    ],
+                },
+                "verification": {"kind": "pytest", "phase": "target", "returncode": 1, "stdout_tail": "x" * 2000},
+                "llm_decision": {"failure_type": "assertion_mismatch", "confidence": 0.8, "summary": "bad assertion"},
+            }
+        ],
     }
 
     evidence = collect_repair_evidence(case_plan, case_dir, 2, Completed())
@@ -45,7 +72,15 @@ def test_collect_repair_evidence_includes_pytest_log_sql_and_presets(tmp_path):
     assert evidence["presets"]["prd_code"] == "UI_HT_P001:UI自动化HT信托产品"
     assert evidence["sql_files"][0]["path"] == str(preset_sql)
     assert "VALUES ('11')" in evidence["sql_files"][0]["content_tail"]
-    assert evidence["previous_repair_attempts"][0]["status"] == "no_action"
+    previous = evidence["previous_repair_attempts"][0]
+    assert previous["status"] == "patched"
+    assert previous["actions"][0]["type"] == "llm_regenerate_case"
+    assert previous["restore"]["status"] == "restored"
+    assert previous["restore"]["files"] == ["test_preview.py"]
+    assert previous["diff"]["case_plan_keys_changed"] == ["insert_plans"]
+    assert previous["validation"]["phase"] == "target"
+    assert len(previous["validation"]["stdout_tail"]) == 800
+    assert previous["llm"]["summary"] == "bad assertion"
 
 
 def test_collect_repair_evidence_is_json_serializable(tmp_path):

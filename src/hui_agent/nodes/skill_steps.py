@@ -15,7 +15,22 @@ from hui_agent.case_inputs import CaseInputPlanner
 from hui_agent.failure_policy import EnvironmentFailure, MenuFailure
 from hui_agent.fill_code import render_pytest_case
 from hui_agent.insert_plan import InsertColumn, InsertPlan, build_insert_plans, load_base_tables, load_schema_cache, render_sql
-from hui_agent.repair_evidence import collect_repair_evidence
+from hui_agent.repair_actions import (
+    allowed_generated_test_paths as _repair_action_generated_test_paths,
+    apply_llm_repair_actions as _repair_action_apply_llm_repair_actions,
+    has_applied_repair_action as _repair_action_has_applied_repair_action,
+    repair_action_event_label as _repair_actions_event_label,
+    repair_duplicate_insert_keys as _repair_action_duplicate_insert_keys,
+    repair_sql_preset_mismatches as _repair_action_sql_preset_mismatches,
+    repairable_sql_paths as _repair_action_sql_paths,
+)
+from hui_agent.repair_transaction import (
+    record_repair_restore as _record_repair_restore,
+    restore_repair_snapshot as _restore_repair_snapshot,
+    snapshot_repair_targets as _snapshot_repair_paths,
+)
+from hui_agent.repair_report import repair_detail_lines, repair_overview_lines
+from hui_agent.repair_evidence import collect_repair_evidence, summarize_repair_attempts_for_evidence
 from hui_agent.sql_guards import evaluate_insert_plan_coverage
 from hui_agent.sql_requirements import build_sql_requirements
 from hui_agent.state import HUITestState, STEP_ORDER
@@ -712,11 +727,13 @@ class SkillStepHandlers:
                 return state.mark_completed("4")
 
             for attempt_no in range(1, max_attempts + 1):
+                trigger_completed = completed
+                snapshot = _snapshot_repair_targets(case_plan, case_plan_path.parent, include_generated_tests=True)
                 repair = _repair_failed_verification(
                     case_plan,
                     case_plan_path.parent,
                     attempt_no,
-                    completed,
+                    trigger_completed,
                     self.repair_advisor,
                     config_path=state.config_path,
                     runner=self.runner,
@@ -735,34 +752,46 @@ class SkillStepHandlers:
                 _write_json(case_plan_path, case_plan)
                 target_paths = _pytest_failed_nodeids(completed, fallback=pytest_paths)
                 target_completed = run_phase("target", attempt_no, target_paths)
+                repair["verification"] = _pytest_repair_validation_summary("target", target_completed)
                 if target_completed.returncode != 0:
                     if _skip_missing_preview_if_only_failure(case_plan, case_plan_path.parent, target_completed, self.runner):
+                        _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="target pytest accepted by preview skip policy")
                         _write_json(case_plan_path, case_plan)
                         return state.mark_completed("4")
                     if _can_accept_environment_flake(case_plan, pytest_paths, target_completed):
                         _mark_environment_flake_passed(case_plan, pytest_paths)
+                        _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="target pytest accepted as environment flake")
                         _write_json(case_plan_path, case_plan)
                         return state.mark_completed("4")
-                    completed = target_completed
+                    _record_repair_restore(repair, snapshot, case_plan, status="restored", reason="target pytest failed")
+                    _restore_repair_snapshot(snapshot, case_plan)
+                    completed = trigger_completed
                     _write_json(case_plan_path, case_plan)
                     if attempt_no >= max_attempts:
                         break
                     continue
                 if _same_pytest_targets(target_paths, pytest_paths):
+                    _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="target pytest passed")
                     _write_json(case_plan_path, case_plan)
                     return state.mark_completed("4")
                 regression_completed = run_phase("regression", attempt_no, pytest_paths)
+                repair["verification"] = _pytest_repair_validation_summary("regression", regression_completed)
                 if regression_completed.returncode == 0:
+                    _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="regression pytest passed")
                     _write_json(case_plan_path, case_plan)
                     return state.mark_completed("4")
                 if _skip_missing_preview_if_only_failure(case_plan, case_plan_path.parent, regression_completed, self.runner):
+                    _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="regression pytest accepted by preview skip policy")
                     _write_json(case_plan_path, case_plan)
                     return state.mark_completed("4")
                 if _can_accept_environment_flake(case_plan, pytest_paths, regression_completed):
                     _mark_environment_flake_passed(case_plan, pytest_paths)
+                    _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="regression pytest accepted as environment flake")
                     _write_json(case_plan_path, case_plan)
                     return state.mark_completed("4")
-                completed = regression_completed
+                _record_repair_restore(repair, snapshot, case_plan, status="restored", reason="regression pytest failed")
+                _restore_repair_snapshot(snapshot, case_plan)
+                completed = trigger_completed
                 _write_json(case_plan_path, case_plan)
                 if attempt_no >= max_attempts:
                     break
@@ -1772,11 +1801,13 @@ def _validate_sql_files_with_repair(
     _refresh_schema_cache_for_dry_run_tables(runner, case_plan, case_plan_dir, config)
 
     for repair_no in range(1, max_repairs + 1):
+        trigger_validation = validation
+        snapshot = _snapshot_repair_targets(case_plan, case_plan_dir, include_generated_tests=False)
         repair = _repair_failed_sql_validation(
             case_plan,
             case_plan_dir,
             repair_no,
-            validation,
+            trigger_validation,
             repair_advisor,
             skill_root=runner.skill_root,
             event_logger=runner.emit,
@@ -1792,6 +1823,7 @@ def _validate_sql_files_with_repair(
             }
         )
         if not _has_applied_repair_action(repair.get("actions", [])):
+            _record_repair_restore(repair, snapshot, case_plan, status="not_needed", reason="no applied repair action")
             break
         validation = _run_sql_dry_run_attempt(
             case_plan,
@@ -1801,10 +1833,16 @@ def _validate_sql_files_with_repair(
             runner,
             attempt_no=repair_no + 1,
         )
+        repair["validation"] = _sql_repair_validation_summary(validation)
         case_plan.setdefault("sql_validation_attempts", []).append(validation)
         case_plan["sql_validation"] = validation
         if validation.get("status") == "passed":
+            _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="SQL dry-run validation passed")
             return validation
+        _record_repair_restore(repair, snapshot, case_plan, status="restored", reason="SQL dry-run validation failed")
+        _restore_repair_snapshot(snapshot, case_plan)
+        validation = trigger_validation
+        case_plan["sql_validation"] = trigger_validation
 
     validation = {**validation, "status": "failed", "failure_reason": "SQL dry-run validation failed after repair attempts"}
     case_plan["sql_validation"] = validation
@@ -2136,9 +2174,9 @@ def _repair_failed_sql_validation(
             _emit_event(event_logger, {"event": "llm_sql_repair_failed", "attempt": attempt_no, "error": str(exc)})
     actions = []
     if attempt.get("llm_decision"):
-        actions.extend(_apply_llm_repair_actions(case_plan, case_plan_dir, attempt["llm_decision"]))
+        actions.extend(_repair_action_apply_llm_repair_actions(case_plan, case_plan_dir, attempt["llm_decision"]))
     if not _has_applied_repair_action(actions):
-        actions.extend(_repair_sql_preset_mismatches(case_plan, case_plan_dir))
+        actions.extend(_repair_action_sql_preset_mismatches(case_plan, case_plan_dir))
     attempt["actions"] = actions
     if _has_applied_repair_action(actions):
         attempt["status"] = "patched"
@@ -2214,7 +2252,7 @@ def _repair_failed_insert_plan_generation(
             _emit_event(event_logger, {"event": "llm_sql_repair_failed", "attempt": attempt_no, "error": str(exc)})
     actions = []
     if attempt.get("llm_decision"):
-        actions.extend(_apply_llm_repair_actions(case_plan, case_plan_dir, attempt["llm_decision"]))
+        actions.extend(_repair_action_apply_llm_repair_actions(case_plan, case_plan_dir, attempt["llm_decision"]))
     attempt["actions"] = actions
     if _has_applied_repair_action(actions):
         attempt["status"] = "patched"
@@ -2265,7 +2303,7 @@ def _collect_insert_plan_repair_evidence(
         "insert_plan_skipped": skipped,
         "table_schemas": _collect_table_schemas(case_plan, skill_root=skill_root),
         "sql_files": _collect_sql_file_tails(case_plan, case_plan_dir),
-        "previous_sql_repair_attempts": case_plan.get("sql_repair_attempts", []),
+        "previous_sql_repair_attempts": summarize_repair_attempts_for_evidence(case_plan.get("sql_repair_attempts", [])),
     }
 
 
@@ -2290,7 +2328,7 @@ def _collect_sql_repair_evidence(
         "insert_plans": case_plan.get("insert_plans", []),
         "insert_plan_skipped": case_plan.get("insert_plan_skipped", []),
         "sql_files": _collect_sql_file_tails(case_plan, case_plan_dir),
-        "previous_sql_repair_attempts": case_plan.get("sql_repair_attempts", []),
+        "previous_sql_repair_attempts": summarize_repair_attempts_for_evidence(case_plan.get("sql_repair_attempts", [])),
         "table_schemas": _collect_table_schemas(case_plan, skill_root=skill_root),
     }
 
@@ -2634,11 +2672,11 @@ def _repair_failed_verification(
             )
     actions = []
     if attempt.get("llm_decision"):
-        actions.extend(_apply_llm_repair_actions(case_plan, case_plan_dir, attempt["llm_decision"]))
+        actions.extend(_repair_action_apply_llm_repair_actions(case_plan, case_plan_dir, attempt["llm_decision"]))
     if not _has_applied_repair_action(actions) and _has_duplicate_key_error(completed):
-        actions.extend(_repair_duplicate_insert_keys(case_plan, case_plan_dir))
+        actions.extend(_repair_action_duplicate_insert_keys(case_plan, case_plan_dir))
     if not _has_applied_repair_action(actions):
-        actions.extend(_repair_sql_preset_mismatches(case_plan, case_plan_dir))
+        actions.extend(_repair_action_sql_preset_mismatches(case_plan, case_plan_dir))
     attempt["actions"] = actions
     if _has_applied_repair_action(actions):
         attempt["status"] = "patched"
@@ -2669,352 +2707,19 @@ def _repair_failed_verification(
 
 
 def _has_applied_repair_action(actions: list[dict]) -> bool:
-    for action in actions:
-        status = action.get("status")
-        if status == "patched":
-            return True
-        if status is None and action.get("type"):
-            return True
-    return False
+    return _repair_action_has_applied_repair_action(actions)
 
 
 def _repair_action_event_label(action: dict) -> str:
-    label = str(action.get("type", ""))
-    status = str(action.get("status", ""))
-    if status:
-        label = f"{label}:{status}"
-    file = str(action.get("file", ""))
-    if file:
-        label = f"{label}@{file}"
-    return label
-
-
-def _apply_llm_repair_actions(case_plan: dict, case_plan_dir: Path, decision: dict) -> list[dict]:
-    actions: list[dict] = []
-    for suggested in decision.get("actions", []) if isinstance(decision, dict) else []:
-        if not isinstance(suggested, dict):
-            continue
-        action_type = suggested.get("type")
-        if action_type == "patch_sql":
-            action = _apply_llm_patch_sql_action(case_plan, case_plan_dir, suggested)
-        elif action_type == "regenerate_case":
-            action = _apply_llm_regenerate_case_action(case_plan, case_plan_dir, suggested)
-        elif action_type == "regenerate_sql":
-            action = _apply_llm_regenerate_sql_action(case_plan, case_plan_dir, suggested)
-        elif action_type == "mark_unfixable":
-            action = {
-                "type": "llm_mark_unfixable",
-                "reason": suggested.get("reason", ""),
-                "status": "recorded",
-            }
-        else:
-            action = {}
-        if action:
-            actions.append(action)
-    return actions
-
-
-def _apply_llm_patch_sql_action(case_plan: dict, case_plan_dir: Path, suggested: dict) -> dict:
-    sql_path = _resolve_repair_target_path(
-        suggested.get("file", ""),
-        case_plan_dir,
-        _allowed_sql_repair_paths(case_plan, case_plan_dir),
-    )
-    if sql_path is None:
-        return {
-            "type": "llm_patch_sql",
-            "status": "skipped",
-            "reason": "target SQL file is not in case_plan.sql_paths",
-            "requested_file": suggested.get("file", ""),
-        }
-    original = sql_path.read_text(encoding="utf-8")
-    repaired = original
-    replacements = _llm_text_replacements(suggested)
-    applied: list[dict] = []
-    for old, new in replacements:
-        if not old or old not in repaired:
-            continue
-        count = repaired.count(old)
-        repaired = repaired.replace(old, new)
-        applied.append({"old": old, "new": new, "count": count})
-    if repaired == original:
-        return {
-            "type": "llm_patch_sql",
-            "status": "skipped",
-            "file": _artifact_path(sql_path, case_plan_dir),
-            "reason": "no LLM replacement matched SQL content",
-            "suggested_reason": suggested.get("reason", ""),
-        }
-    validation_error = _validate_llm_generated_sql(repaired)
-    if validation_error:
-        return {
-            "type": "llm_patch_sql",
-            "status": "skipped",
-            "file": _artifact_path(sql_path, case_plan_dir),
-            "reason": validation_error,
-            "suggested_reason": suggested.get("reason", ""),
-            "changes": applied,
-        }
-    sql_path.parent.mkdir(parents=True, exist_ok=True)
-    sql_path.write_text(repaired, encoding="utf-8")
-    return {
-        "type": "llm_patch_sql",
-        "status": "patched",
-        "file": _artifact_path(sql_path, case_plan_dir),
-        "reason": suggested.get("reason", ""),
-        "changes": applied,
-    }
-
-
-def _apply_llm_regenerate_sql_action(case_plan: dict, case_plan_dir: Path, suggested: dict) -> dict:
-    sql_path = _resolve_repair_target_path(
-        suggested.get("file", ""),
-        case_plan_dir,
-        _allowed_sql_repair_paths(case_plan, case_plan_dir),
-    )
-    if sql_path is None:
-        return {
-            "type": "llm_regenerate_sql",
-            "status": "skipped",
-            "reason": "target SQL file is not in case_plan.sql_paths",
-            "requested_file": suggested.get("file", ""),
-        }
-    content = str(suggested.get("content") or suggested.get("new_text") or "")
-    validation_error = _validate_llm_generated_sql(content)
-    if validation_error:
-        return {
-            "type": "llm_regenerate_sql",
-            "status": "skipped",
-            "file": _artifact_path(sql_path, case_plan_dir),
-            "reason": validation_error,
-            "suggested_reason": suggested.get("reason", ""),
-        }
-    old_content = sql_path.read_text(encoding="utf-8") if sql_path.exists() else ""
-    if content == old_content:
-        return {
-            "type": "llm_regenerate_sql",
-            "status": "skipped",
-            "file": _artifact_path(sql_path, case_plan_dir),
-            "reason": "generated SQL content is unchanged",
-        }
-    sql_path.parent.mkdir(parents=True, exist_ok=True)
-    sql_path.write_text(content, encoding="utf-8")
-    return {
-        "type": "llm_regenerate_sql",
-        "status": "patched",
-        "file": _artifact_path(sql_path, case_plan_dir),
-        "reason": suggested.get("reason", ""),
-        "old_size": len(old_content),
-        "new_size": len(content),
-    }
-
-
-def _apply_llm_regenerate_case_action(case_plan: dict, case_plan_dir: Path, suggested: dict) -> dict:
-    test_path = _resolve_repair_target_path(
-        suggested.get("file", ""),
-        case_plan_dir,
-        _allowed_generated_test_paths(case_plan, case_plan_dir),
-    )
-    if test_path is None:
-        test_path = _find_generated_test_by_case_type(case_plan, case_plan_dir, str(suggested.get("case_type", "")))
-    if test_path is None:
-        return {
-            "type": "llm_regenerate_case",
-            "status": "skipped",
-            "reason": "target pytest file is not in generated_tests",
-            "requested_file": suggested.get("file", ""),
-            "case_type": suggested.get("case_type", ""),
-        }
-    content = str(suggested.get("content") or suggested.get("new_text") or "")
-    validation_error = _validate_llm_generated_pytest(content)
-    if validation_error:
-        return {
-            "type": "llm_regenerate_case",
-            "status": "skipped",
-            "file": _artifact_path(test_path, case_plan_dir),
-            "reason": validation_error,
-            "suggested_reason": suggested.get("reason", ""),
-        }
-    old_content = test_path.read_text(encoding="utf-8") if test_path.exists() else ""
-    if content == old_content:
-        return {
-            "type": "llm_regenerate_case",
-            "status": "skipped",
-            "file": _artifact_path(test_path, case_plan_dir),
-            "reason": "generated content is unchanged",
-        }
-    test_path.parent.mkdir(parents=True, exist_ok=True)
-    test_path.write_text(content, encoding="utf-8")
-    return {
-        "type": "llm_regenerate_case",
-        "status": "patched",
-        "file": _artifact_path(test_path, case_plan_dir),
-        "case_type": suggested.get("case_type", ""),
-        "reason": suggested.get("reason", ""),
-        "old_size": len(old_content),
-        "new_size": len(content),
-    }
-
-
-def _llm_text_replacements(suggested: dict) -> list[tuple[str, str]]:
-    replacements: list[tuple[str, str]] = []
-    old_text = str(suggested.get("old_text") or "")
-    new_text = str(suggested.get("new_text") or "")
-    if old_text and new_text:
-        replacements.append((old_text, new_text))
-    for change in suggested.get("changes", []):
-        if not isinstance(change, dict):
-            continue
-        old = change.get("old_text", change.get("old", ""))
-        new = change.get("new_text", change.get("new", ""))
-        if old is None or new is None:
-            continue
-        replacements.append((str(old), str(new)))
-    return replacements
-
-
-def _allowed_sql_repair_paths(case_plan: dict, case_plan_dir: Path) -> set[Path]:
-    result: set[Path] = set()
-    for path in _repairable_sql_paths(case_plan, case_plan_dir):
-        result.add(path.resolve())
-    return result
+    return _repair_actions_event_label(action)
 
 
 def _allowed_generated_test_paths(case_plan: dict, case_plan_dir: Path) -> set[Path]:
-    result: set[Path] = set()
-    for value in case_plan.get("generated_tests", []):
-        if not isinstance(value, str):
-            continue
-        result.add(Path(_resolve_artifact_path(value, case_plan_dir)).resolve())
-    return result
+    return _repair_action_generated_test_paths(case_plan, case_plan_dir)
 
 
-def _resolve_repair_target_path(requested: str, case_plan_dir: Path, allowed: set[Path]) -> Path | None:
-    if not allowed:
-        return None
-    if not requested:
-        return next(iter(sorted(allowed, key=lambda path: str(path)))) if len(allowed) == 1 else None
-    path = Path(str(requested))
-    if not path.is_absolute():
-        path = case_plan_dir / path
-    resolved = path.resolve()
-    return resolved if resolved in allowed else None
-
-
-def _find_generated_test_by_case_type(case_plan: dict, case_plan_dir: Path, case_type: str) -> Path | None:
-    if not case_type:
-        return None
-    for path in _allowed_generated_test_paths(case_plan, case_plan_dir):
-        lowered = path.name.lower()
-        if case_type.lower() in lowered:
-            return path
-    return None
-
-
-def _validate_llm_generated_pytest(content: str) -> str:
-    if not content.strip():
-        return "LLM regenerate_case did not provide content"
-    if "def test_" not in content:
-        return "LLM regenerate_case content does not define a pytest test"
-    if "assert True" in content or "assert 1 == 1" in content:
-        return "LLM regenerate_case content contains a fake assertion"
-    return ""
-
-
-def _validate_llm_generated_sql(content: str) -> str:
-    sql = content.strip()
-    if not sql:
-        return "LLM regenerate_sql did not provide content"
-    if not re.search(r"\b(INSERT|DELETE|UPDATE|COMMIT)\b", sql, flags=re.IGNORECASE):
-        return "LLM regenerate_sql content does not contain DML"
-    forbidden = re.search(
-        r"\b(DROP|ALTER|TRUNCATE|CREATE|RENAME|GRANT|REVOKE|EXEC|CALL)\b",
-        sql,
-        flags=re.IGNORECASE,
-    )
-    if forbidden:
-        return f"LLM regenerate_sql content contains forbidden statement: {forbidden.group(1).upper()}"
-    insert_count_error = _validate_insert_value_counts(sql)
-    if insert_count_error:
-        return insert_count_error
-    return ""
-
-
-def _validate_insert_value_counts(sql: str) -> str:
-    pattern = re.compile(
-        r"\bINSERT\s+INTO\s+[^\(;]+\((?P<columns>.*?)\)\s+VALUES\s*(?P<values>.*?);",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    for match in pattern.finditer(sql):
-        columns = _split_sql_csv(match.group("columns"))
-        if not columns:
-            continue
-        rows = _extract_sql_value_rows(match.group("values"))
-        for index, row in enumerate(rows, start=1):
-            values = _split_sql_csv(row)
-            if len(values) != len(columns):
-                return (
-                    "LLM regenerate_sql INSERT value count mismatch: "
-                    f"expected {len(columns)} values but row {index} has {len(values)}"
-                )
-    return ""
-
-
-def _extract_sql_value_rows(values_sql: str) -> list[str]:
-    rows: list[str] = []
-    start: int | None = None
-    depth = 0
-    in_quote = False
-    index = 0
-    while index < len(values_sql):
-        char = values_sql[index]
-        if char == "'":
-            if in_quote and index + 1 < len(values_sql) and values_sql[index + 1] == "'":
-                index += 2
-                continue
-            in_quote = not in_quote
-        elif not in_quote:
-            if char == "(":
-                if depth == 0:
-                    start = index + 1
-                depth += 1
-            elif char == ")" and depth:
-                depth -= 1
-                if depth == 0 and start is not None:
-                    rows.append(values_sql[start:index])
-                    start = None
-        index += 1
-    return rows
-
-
-def _split_sql_csv(text: str) -> list[str]:
-    items: list[str] = []
-    start = 0
-    depth = 0
-    in_quote = False
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "'":
-            if in_quote and index + 1 < len(text) and text[index + 1] == "'":
-                index += 2
-                continue
-            in_quote = not in_quote
-        elif not in_quote:
-            if char == "(":
-                depth += 1
-            elif char == ")" and depth:
-                depth -= 1
-            elif char == "," and depth == 0:
-                item = text[start:index].strip()
-                if item:
-                    items.append(item)
-                start = index + 1
-        index += 1
-    item = text[start:].strip()
-    if item:
-        items.append(item)
-    return items
+def _repairable_sql_paths(case_plan: dict, case_plan_dir: Path) -> list[Path]:
+    return _repair_action_sql_paths(case_plan, case_plan_dir)
 
 
 def _has_duplicate_key_error(completed: subprocess.CompletedProcess[str]) -> bool:
@@ -3031,6 +2736,33 @@ def _emit_event(event_logger, payload: dict) -> None:
         return
 
 
+def _snapshot_repair_targets(case_plan: dict, case_plan_dir: Path, *, include_generated_tests: bool) -> dict:
+    paths = {path.resolve() for path in _repairable_sql_paths(case_plan, case_plan_dir)}
+    if include_generated_tests:
+        paths.update(path.resolve() for path in _allowed_generated_test_paths(case_plan, case_plan_dir))
+    return _snapshot_repair_paths(case_plan, case_plan_dir, paths=paths, label_path=_artifact_path)
+
+
+def _sql_repair_validation_summary(validation: dict) -> dict:
+    return {
+        "kind": "sql_dry_run",
+        "status": validation.get("status"),
+        "attempt": validation.get("attempt"),
+        "failed_count": validation.get("failed_count", 0),
+        "failure_reason": validation.get("failure_reason", ""),
+    }
+
+
+def _pytest_repair_validation_summary(phase: str, completed: subprocess.CompletedProcess[str]) -> dict:
+    return {
+        "kind": "pytest",
+        "phase": phase,
+        "returncode": completed.returncode,
+        "stdout_tail": (completed.stdout or "")[-2000:],
+        "stderr_tail": (completed.stderr or "")[-2000:],
+    }
+
+
 def _summarize_repair_evidence(evidence: dict) -> dict:
     return {
         "has_query_log": bool(evidence.get("query_log_tail")),
@@ -3039,327 +2771,6 @@ def _summarize_repair_evidence(evidence: dict) -> dict:
         "preset_keys": sorted((evidence.get("presets") or {}).keys()),
         "pytest_returncode": (evidence.get("pytest") or {}).get("returncode"),
     }
-
-
-def _repair_sql_preset_mismatches(case_plan: dict, case_plan_dir: Path) -> list[dict]:
-    replacements = _preset_sql_replacements(case_plan)
-    if not replacements:
-        return []
-    actions: list[dict] = []
-    for sql_path in _repairable_sql_paths(case_plan, case_plan_dir):
-        if not sql_path.exists() or not sql_path.is_file():
-            continue
-        original = sql_path.read_text(encoding="utf-8")
-        repaired = original
-        changes: list[dict] = []
-        for column, new_value in replacements.items():
-            repaired, column_changes = _replace_sql_column_values(repaired, column, new_value)
-            changes.extend(column_changes)
-        if repaired == original:
-            continue
-        sql_path.parent.mkdir(parents=True, exist_ok=True)
-        sql_path.write_text(repaired, encoding="utf-8")
-        actions.append(
-            {
-                "type": "patch_sql",
-                "file": _artifact_path(sql_path, case_plan_dir),
-                "reason": "SQL literal values differ from case_plan presets",
-                "changes": changes,
-            }
-        )
-    return actions
-
-
-def _repair_duplicate_insert_keys(case_plan: dict, case_plan_dir: Path) -> list[dict]:
-    plan_dicts = case_plan.get("insert_plans", [])
-    if not isinstance(plan_dicts, list):
-        return []
-    actions: list[dict] = []
-    changed = False
-    for plan in plan_dicts:
-        if not isinstance(plan, dict):
-            continue
-        rows = plan.get("rows")
-        if not isinstance(rows, list) or len(rows) < 2:
-            continue
-        key_columns = _delete_where_key_columns(str(plan.get("delete_where", "")))
-        if not key_columns:
-            continue
-        repaired_rows, changes = _dedupe_insert_plan_rows(rows, key_columns)
-        if not changes:
-            continue
-        changed = True
-        plan["rows"] = repaired_rows if len(repaired_rows) > 1 else None
-        plan["columns"] = repaired_rows[0]
-        plan["delete_where"] = _delete_where_from_row_dicts(repaired_rows, key_columns)
-        actions.append(
-            {
-                "type": "patch_duplicate_insert_keys",
-                "table": plan.get("physical_table") or plan.get("table"),
-                "reason": "multi-row INSERT reused the same key columns",
-                "changes": changes,
-            }
-        )
-    if not changed:
-        return []
-    case_plan["insert_plans"] = plan_dicts
-    _rewrite_sql_from_insert_plan_dicts(case_plan, case_plan_dir)
-    return actions
-
-
-def _delete_where_key_columns(delete_where: str) -> list[str]:
-    columns: list[str] = []
-    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\b\s*=", delete_where):
-        column = match.group(1)
-        if column not in columns:
-            columns.append(column)
-    return columns
-
-
-def _dedupe_insert_plan_rows(rows: list, key_columns: list[str]) -> tuple[list[list[dict]], list[dict]]:
-    result: list[list[dict]] = []
-    seen: set[tuple[str, ...]] = set()
-    changes: list[dict] = []
-    for row in rows:
-        if not isinstance(row, list):
-            continue
-        row_dicts = [dict(column) for column in row if isinstance(column, dict)]
-        identity = _row_dict_identity(row_dicts, key_columns)
-        if identity not in seen:
-            seen.add(identity)
-            result.append(row_dicts)
-            continue
-        distinct_row = _make_row_dict_identity_distinct(row_dicts, key_columns, seen)
-        if distinct_row:
-            new_identity = _row_dict_identity(distinct_row, key_columns)
-            seen.add(new_identity)
-            result.append(distinct_row)
-            changes.append({"action": "make_distinct", "old_key": list(identity), "new_key": list(new_identity)})
-            continue
-        changes.append({"action": "collapse_duplicate", "key": list(identity)})
-    return result, changes
-
-
-def _row_dict_identity(row: list[dict], key_columns: list[str]) -> tuple[str, ...]:
-    values = {str(column.get("name")): str(column.get("value", "")) for column in row}
-    return tuple(values.get(column, "") for column in key_columns)
-
-
-def _make_row_dict_identity_distinct(
-    row: list[dict],
-    key_columns: list[str],
-    seen: set[tuple[str, ...]],
-) -> list[dict] | None:
-    by_name = {str(column.get("name")): column for column in row}
-    for candidate in ("serial_no", "global_serial_no", "ex_serial", "cfm_no", "request_no", "apply_no", "client_no"):
-        if candidate not in key_columns or candidate not in by_name:
-            continue
-        current = str(by_name[candidate].get("value", ""))
-        next_value = _increment_tail_number(current)
-        for _ in range(20):
-            replacements = {candidate: next_value}
-            if candidate == "serial_no" and "global_serial_no" in by_name:
-                replacements["global_serial_no"] = next_value
-            patched = [
-                {**column, "value": replacements.get(str(column.get("name")), column.get("value", ""))}
-                for column in row
-            ]
-            identity = _row_dict_identity(patched, key_columns)
-            if identity not in seen:
-                return patched
-            next_value = _increment_tail_number(next_value)
-    return None
-
-
-def _delete_where_from_row_dicts(rows: list[list[dict]], key_columns: list[str]) -> str:
-    clauses: list[str] = []
-    for row in rows:
-        values = {str(column.get("name")): str(column.get("value", "")) for column in row}
-        clause = " AND ".join(f"{column} = '{_escape_sql_literal(values[column])}'" for column in key_columns if column in values)
-        if clause and clause not in clauses:
-            clauses.append(clause)
-    if len(clauses) == 1:
-        return clauses[0]
-    return " OR ".join(f"({clause})" for clause in clauses)
-
-
-def _rewrite_sql_from_insert_plan_dicts(case_plan: dict, case_plan_dir: Path) -> None:
-    plans = [_insert_plan_from_dict(plan) for plan in case_plan.get("insert_plans", []) if isinstance(plan, dict)]
-    sql_paths = _resolve_path_map(case_plan.get("sql_paths", {}), case_plan_dir)
-    base_plans = [plan for plan in plans if plan.role == "base"]
-    preset_plans = [plan for plan in plans if plan.role != "base"]
-    if sql_paths.get("base_sql"):
-        _write_text(Path(sql_paths["base_sql"]), render_sql(base_plans, include_db_prefix=False))
-    if sql_paths.get("preset_sql"):
-        _write_text(Path(sql_paths["preset_sql"]), render_sql(preset_plans, include_db_prefix=False))
-
-
-def _insert_plan_from_dict(plan: dict) -> InsertPlan:
-    rows = plan.get("rows")
-    parsed_rows = None
-    if isinstance(rows, list):
-        parsed_rows = [[_insert_column_from_dict(column) for column in row] for row in rows if isinstance(row, list)]
-    return InsertPlan(
-        table=str(plan.get("table", "")),
-        physical_table=str(plan.get("physical_table") or plan.get("table", "")),
-        role=str(plan.get("role", "business")),
-        columns=[_insert_column_from_dict(column) for column in plan.get("columns", []) if isinstance(column, dict)],
-        delete_where=str(plan.get("delete_where", "")),
-        rows=parsed_rows,
-        db=str(plan.get("db", "")),
-    )
-
-
-def _insert_column_from_dict(column: dict) -> InsertColumn:
-    return InsertColumn(
-        name=str(column.get("name", "")),
-        value=str(column.get("value", "")),
-        source=str(column.get("source", "")),
-    )
-
-
-def _preset_sql_replacements(case_plan: dict) -> dict[str, str]:
-    presets = case_plan.get("presets", {})
-    mapping = {
-        "prd_code": "prd_code",
-        "ta_code": "ta_code",
-        "prd_name": "prd_name",
-        "customer_id": "bank_acc",
-        "customer_id_type": "id_kind",
-    }
-    replacements: dict[str, str] = {}
-    for preset_key, column in mapping.items():
-        value = presets.get(preset_key)
-        if not value:
-            continue
-        replacements[column] = _clean_sql_repair_value(value)
-    return replacements
-
-
-def _clean_sql_repair_value(value: object) -> str:
-    text = str(value or "")
-    if ":" in text:
-        return text.split(":", 1)[0]
-    return text
-
-
-def _repairable_sql_paths(case_plan: dict, case_plan_dir: Path) -> list[Path]:
-    result: list[Path] = []
-    for value in (case_plan.get("sql_paths") or {}).values():
-        if not isinstance(value, str) or not value.lower().endswith(".sql"):
-            continue
-        path = Path(_resolve_artifact_path(value, case_plan_dir))
-        if path not in result:
-            result.append(path)
-    return result
-
-
-def _replace_sql_column_values(sql: str, column: str, new_value: str) -> tuple[str, list[dict]]:
-    changes: list[dict] = []
-
-    def replace_assignment(match: re.Match[str]) -> str:
-        old_value = match.group("value")
-        if old_value == new_value:
-            return match.group(0)
-        changes.append({"column": column, "old": old_value, "new": new_value, "pattern": "assignment"})
-        return f"{match.group('prefix')}'{_escape_sql_literal(new_value)}'"
-
-    assignment_pattern = re.compile(
-        rf"(?P<prefix>\b{re.escape(column)}\b\s*=\s*)'(?P<value>[^']*)'",
-        flags=re.IGNORECASE,
-    )
-    sql = assignment_pattern.sub(replace_assignment, sql)
-
-    insert_pattern = re.compile(
-        r"(?P<head>INSERT\s+INTO\s+[^\(]+\((?P<columns>[^)]*)\)\s+VALUES\s*)"
-        r"(?P<values>\((?P<items>[^;]*)\))",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-    def replace_insert(match: re.Match[str]) -> str:
-        columns = [item.strip().strip("`").lower() for item in match.group("columns").split(",")]
-        if column.lower() not in columns:
-            return match.group(0)
-        index = columns.index(column.lower())
-        rows = _split_sql_value_rows(match.group("values"))
-        if not rows:
-            return match.group(0)
-        rendered_rows: list[str] = []
-        changed = False
-        for row in rows:
-            values = _split_sql_values(row)
-            if index >= len(values):
-                rendered_rows.append("(" + ", ".join(values) + ")")
-                continue
-            old_token = values[index].strip()
-            old_value = _unquote_sql_literal(old_token)
-            if old_value != new_value:
-                values[index] = f"'{_escape_sql_literal(new_value)}'"
-                changes.append({"column": column, "old": old_value, "new": new_value, "pattern": "insert_values"})
-                changed = True
-            rendered_rows.append("(" + ", ".join(values) + ")")
-        if not changed:
-            return match.group(0)
-        return match.group("head") + ",\n  ".join(rendered_rows)
-
-    sql = insert_pattern.sub(replace_insert, sql)
-    return sql, changes
-
-
-def _split_sql_value_rows(values_block: str) -> list[str]:
-    rows: list[str] = []
-    depth = 0
-    in_quote = False
-    start = -1
-    i = 0
-    while i < len(values_block):
-        char = values_block[i]
-        if char == "'" and not (in_quote and i + 1 < len(values_block) and values_block[i + 1] == "'"):
-            in_quote = not in_quote
-        elif char == "'" and in_quote and i + 1 < len(values_block) and values_block[i + 1] == "'":
-            i += 1
-        elif not in_quote and char == "(":
-            if depth == 0:
-                start = i + 1
-            depth += 1
-        elif not in_quote and char == ")":
-            depth -= 1
-            if depth == 0 and start >= 0:
-                rows.append(values_block[start:i])
-                start = -1
-        i += 1
-    return rows
-
-
-def _split_sql_values(row: str) -> list[str]:
-    values: list[str] = []
-    in_quote = False
-    start = 0
-    i = 0
-    while i < len(row):
-        char = row[i]
-        if char == "'" and in_quote and i + 1 < len(row) and row[i + 1] == "'":
-            i += 2
-            continue
-        if char == "'":
-            in_quote = not in_quote
-        elif char == "," and not in_quote:
-            values.append(row[start:i].strip())
-            start = i + 1
-        i += 1
-    values.append(row[start:].strip())
-    return values
-
-
-def _unquote_sql_literal(token: str) -> str:
-    text = token.strip()
-    if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
-        return text[1:-1].replace("''", "'")
-    return text
-
-
-def _escape_sql_literal(value: str) -> str:
-    return value.replace("'", "''")
 
 
 def _has_permission_rows(plans: list) -> bool:
@@ -4081,6 +3492,7 @@ def _render_summary(case_plan: dict) -> str:
     generated_tests = case_plan.get("generated_tests", [])
     insert_plans = case_plan.get("insert_plans", [])
     repair_attempts = case_plan.get("repair_attempts", [])
+    sql_repair_attempts = case_plan.get("sql_repair_attempts", [])
     lines = [
         f"# {menu.get('name', 'HUI Menu')} 执行报告",
         "",
@@ -4095,27 +3507,6 @@ def _render_summary(case_plan: dict) -> str:
         lines.append(f"- 验证说明: {verification.get('qualification')}")
     if verification.get("warning"):
         lines.append(f"- 环境提示: {verification.get('warning')}")
-    if repair_attempts:
-        last_attempt = repair_attempts[-1]
-        patched_count = sum(1 for attempt in repair_attempts if attempt.get("actions"))
-        lines.append(f"- 修复尝试次数: {len(repair_attempts)}")
-        lines.append(f"- SQL patch 轮次: {patched_count}")
-        lines.append(f"- 最后修复状态: {last_attempt.get('status', 'unknown')}")
-        lines.append("")
-        lines.append("## 修复过程")
-        for attempt in repair_attempts:
-            lines.append(_render_repair_attempt_line(attempt))
+    lines.extend(repair_overview_lines(sql_repair_attempts, repair_attempts))
+    lines.extend(repair_detail_lines(sql_repair_attempts, repair_attempts))
     return "\n".join(lines) + "\n"
-
-
-def _render_repair_attempt_line(attempt: dict) -> str:
-    attempt_no = attempt.get("attempt", "?")
-    status = attempt.get("status", "unknown")
-    pytest_returncode = (attempt.get("pytest") or {}).get("returncode", "")
-    llm = attempt.get("llm_decision") or {}
-    llm_summary = llm.get("summary") or attempt.get("llm_error") or ""
-    actions = ",".join(action.get("type", "") for action in attempt.get("actions", []) if action.get("type")) or "none"
-    return (
-        f"- 第{attempt_no}轮: status={status}, pytest={pytest_returncode}, "
-        f"llm={llm_summary}, actions={actions}"
-    )

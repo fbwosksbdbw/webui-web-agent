@@ -46,6 +46,44 @@ def test_llm_repair_advisor_sends_structured_evidence_and_returns_decision():
     assert sent["sql_files"][0]["path"] == "FUNC_A.sql"
 
 
+def test_llm_repair_advisor_includes_previous_restore_diff_summary():
+    client = FakeClient()
+    advisor = LLMRepairAdvisor(client)
+    evidence = {
+        "pytest": {"stdout_tail": "assert cnt == 1", "stderr_tail": ""},
+        "previous_repair_attempts": [
+            {
+                "attempt": 1,
+                "status": "patched",
+                "actions": [{"type": "llm_regenerate_case", "status": "patched", "file": "test_preview.py"}],
+                "restore": {
+                    "status": "restored",
+                    "reason": "regression pytest failed",
+                    "files": ["test_preview.py", "preset.sql"],
+                    "case_plan_keys": ["insert_plans"],
+                },
+                "diff": {
+                    "files_changed": ["test_preview.py", "preset.sql"],
+                    "case_plan_keys_changed": ["insert_plans"],
+                    "file_details": [{"file": "test_preview.py", "old_size": 10, "new_size": 200}],
+                },
+                "verification": {"kind": "pytest", "phase": "regression", "returncode": 1, "stdout_tail": "x" * 4000},
+                "llm_decision": {"failure_type": "assertion_mismatch", "confidence": 0.8, "summary": "changed preview"},
+            }
+        ],
+    }
+
+    advisor.diagnose(evidence)
+
+    sent = json.loads(client.calls[0]["user"])
+    previous = sent["previous_repair_attempts"][0]
+    assert previous["restore"]["reason"] == "regression pytest failed"
+    assert previous["diff"]["files_changed"] == ["test_preview.py", "preset.sql"]
+    assert previous["validation"]["phase"] == "regression"
+    assert len(previous["validation"]["stdout_tail"]) == 800
+    assert previous["llm"]["summary"] == "changed preview"
+
+
 def test_llm_permission_advisor_judges_branch_filter_from_structured_case_plan():
     class PermissionClient(FakeClient):
         def complete_json(self, *, system: str, user: str) -> dict:

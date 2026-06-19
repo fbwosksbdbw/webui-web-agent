@@ -34,7 +34,7 @@ def collect_repair_evidence(
         "sql_files": _collect_sql_files(case_plan, case_plan_dir),
         "generated_tests": _collect_generated_tests(case_plan, case_plan_dir, failed_nodeids),
         "database_checks": case_plan.get("database_checks", []),
-        "previous_repair_attempts": case_plan.get("repair_attempts", []),
+        "previous_repair_attempts": summarize_repair_attempts_for_evidence(case_plan.get("repair_attempts", [])),
         "table_schemas": _collect_table_schemas_for_evidence(case_plan),
         "db_snapshot": db_snapshot or {},
     }
@@ -154,6 +154,113 @@ def _collect_table_schemas_for_evidence(case_plan: dict[str, Any]) -> dict[str, 
         columns = [c.get("name", "") for c in plan.get("columns", []) if isinstance(c, dict) and c.get("name")]
         schemas[table] = {"columns_in_insert": columns}
     return schemas
+
+
+def summarize_repair_attempts_for_evidence(attempts: Any, *, limit: int = 3) -> list[dict[str, Any]]:
+    if not isinstance(attempts, list):
+        return []
+    return [_summarize_repair_attempt(attempt) for attempt in attempts[-limit:] if isinstance(attempt, dict)]
+
+
+def _summarize_repair_attempt(attempt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "attempt": attempt.get("attempt"),
+        "status": attempt.get("status"),
+        "strategy": attempt.get("strategy", ""),
+        "actions": _summarize_repair_actions(attempt.get("actions", [])),
+        "restore": _summarize_restore(attempt.get("restore", {})),
+        "diff": _summarize_diff(attempt.get("diff", {})),
+        "validation": _summarize_validation(attempt.get("validation") or attempt.get("verification") or {}),
+        "llm": _summarize_llm(attempt.get("llm_decision") or attempt.get("llm", {}), attempt.get("llm_error", "")),
+    }
+
+
+def _summarize_repair_actions(actions: Any) -> list[dict[str, Any]]:
+    if not isinstance(actions, list):
+        return []
+    result = []
+    for action in actions[:8]:
+        if not isinstance(action, dict):
+            continue
+        result.append(
+            {
+                "type": action.get("type", ""),
+                "status": action.get("status", ""),
+                "file": action.get("file", ""),
+                "reason": action.get("reason") or action.get("suggested_reason", ""),
+                "table": action.get("table", ""),
+                "case_type": action.get("case_type", ""),
+                "change_count": len(action.get("changes", [])) if isinstance(action.get("changes"), list) else 0,
+            }
+        )
+    return result
+
+
+def _summarize_restore(restore: Any) -> dict[str, Any]:
+    if not isinstance(restore, dict):
+        return {}
+    return {
+        "status": restore.get("status", ""),
+        "reason": restore.get("reason", ""),
+        "files": _short_list(restore.get("files", [])),
+        "case_plan_keys": _short_list(restore.get("case_plan_keys", [])),
+    }
+
+
+def _summarize_diff(diff: Any) -> dict[str, Any]:
+    if not isinstance(diff, dict):
+        return {}
+    return {
+        "files_changed": _short_list(diff.get("files_changed", [])),
+        "case_plan_keys_changed": _short_list(diff.get("case_plan_keys_changed", [])),
+        "file_details": [
+            {
+                "file": item.get("file", ""),
+                "old_exists": item.get("old_exists"),
+                "new_exists": item.get("new_exists"),
+                "old_size": item.get("old_size"),
+                "new_size": item.get("new_size"),
+            }
+            for item in diff.get("file_details", [])[:8]
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def _summarize_validation(validation: Any) -> dict[str, Any]:
+    if not isinstance(validation, dict):
+        return {}
+    return {
+        "kind": validation.get("kind", ""),
+        "phase": validation.get("phase", ""),
+        "status": validation.get("status", ""),
+        "attempt": validation.get("attempt"),
+        "returncode": validation.get("returncode"),
+        "failed_count": validation.get("failed_count"),
+        "failure_reason": validation.get("failure_reason", ""),
+        "stdout_tail": _tail(validation.get("stdout_tail", ""), limit=800),
+        "stderr_tail": _tail(validation.get("stderr_tail", ""), limit=800),
+    }
+
+
+def _summarize_llm(llm_decision: Any, llm_error: Any) -> dict[str, Any]:
+    if isinstance(llm_decision, dict) and llm_decision:
+        if "error" in llm_decision:
+            return {"error": str(llm_decision.get("error", ""))}
+        return {
+            "failure_type": llm_decision.get("failure_type", ""),
+            "confidence": llm_decision.get("confidence"),
+            "summary": llm_decision.get("summary", ""),
+        }
+    if llm_error:
+        return {"error": str(llm_error)}
+    return {}
+
+
+def _short_list(values: Any, *, limit: int = 8) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(value) for value in values[:limit] if str(value or "").strip()]
 
 
 def _read_tail(path: Path, limit: int = 8000) -> str:

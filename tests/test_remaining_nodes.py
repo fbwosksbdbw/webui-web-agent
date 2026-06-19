@@ -8,6 +8,7 @@ import pytest
 
 from hui_agent.nodes.skill_steps import (
     _case_generation_order,
+    _collect_sql_repair_evidence,
     _collect_table_schemas,
     _collapse_permission_rows,
     _query_db_snapshot_for_diagnosis,
@@ -1071,6 +1072,140 @@ def test_sql_generate_repairs_dry_run_failure_with_llm_sql_rewrite(tmp_path):
     assert case_plan["sql_repair_attempts"][0]["status"] == "patched"
     assert case_plan["sql_repair_attempts"][0]["actions"][0]["type"] == "llm_regenerate_sql"
     assert "sql_dry_run_finished" in [event["event"] for event in events]
+
+
+def test_sql_generate_restores_llm_sql_rewrite_when_dry_run_still_fails(tmp_path):
+    skill = tmp_path / "skill"
+    case_dir = tmp_path / "case"
+    sql_dir = tmp_path / "sql"
+    calls_file = tmp_path / "dry_run_calls.txt"
+    case_dir.mkdir()
+    sql_dir.mkdir()
+    preset_sql = sql_dir / "preset.sql"
+    (case_dir / "config.json").write_text(
+        json.dumps({"presets": {"customer_id": "BAD_ACC"}}),
+        encoding="utf-8",
+    )
+    (case_dir / "case_plan.json").write_text(
+        json.dumps(
+            {
+                "menu": {"name": "菜单A"},
+                "case_inputs": {
+                    "querymulti": {
+                        "fields": [{"label": "客户标识", "type": "input", "value": "BAD_ACC"}],
+                        "excluded": {},
+                    }
+                },
+                "preset_strategy": {"base_tables": [], "biz_tables": ["biztable"]},
+                "shard": {"db": "ui_fund", "physical_tables": {"biztable": ["biztable1"]}},
+                "repair_policy": {"max_attempts": 1},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_script(
+        skill / "scripts" / "config_reader.py",
+        "import json\n"
+        f"print(json.dumps({{'base_sql': {json.dumps(str(sql_dir / 'base.sql'))}, 'preset_sql': {json.dumps(str(preset_sql))}}}))\n",
+    )
+    _write_script(
+        skill / "scripts" / "dry_run_sql.py",
+        "import json, pathlib, sys\n"
+        f"calls = pathlib.Path({json.dumps(str(calls_file))})\n"
+        "calls.write_text((calls.read_text() if calls.exists() else '') + '1', encoding='utf-8')\n"
+        "path = pathlib.Path(sys.argv[sys.argv.index('--file') + 1])\n"
+        "sql = path.read_text(encoding='utf-8')\n"
+        "print(json.dumps({'ok': False, 'total': 1, 'passed': 0, 'failed': 1, 'errors': [{'line': 1, 'error': 'still bad', 'stmt_preview': sql[:80]}]}))\n"
+        "raise SystemExit(1)\n",
+    )
+    _write_schema_cache(
+        skill,
+        {
+            "biztable1": {
+                "required_columns": ["bank_acc"],
+                "all_columns": ["bank_acc"],
+            }
+        },
+        "ui_fund",
+    )
+
+    class Advisor:
+        def diagnose(self, evidence):
+            return {
+                "failure_type": "preset_sql_execution_failed",
+                "confidence": 0.91,
+                "summary": "rewrite with a bad candidate",
+                "actions": [
+                    {
+                        "type": "regenerate_sql",
+                        "file": str(preset_sql),
+                        "reason": "candidate still fails dry-run",
+                        "content": "DELETE FROM biztable1 WHERE bank_acc = 'STILL_BAD';\n"
+                        "INSERT INTO biztable1 (bank_acc) VALUES ('STILL_BAD');\n"
+                        "COMMIT;\n",
+                    }
+                ],
+            }
+
+    with pytest.raises(Exception, match="SQL dry-run validation failed"):
+        build_default_step_handlers(skill, repair_advisor=Advisor())["2c"](_state(case_dir))
+
+    case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
+    sql = preset_sql.read_text(encoding="utf-8")
+    attempt = case_plan["sql_repair_attempts"][0]
+    assert "BAD_ACC" in sql
+    assert "STILL_BAD" not in sql
+    assert len(calls_file.read_text(encoding="utf-8")) == 2
+    assert attempt["actions"][0]["type"] == "llm_regenerate_sql"
+    assert attempt["restore"]["status"] == "restored"
+    assert attempt["restore"]["files"][0].replace("\\", "/").endswith("preset.sql")
+    assert attempt["validation"]["status"] == "failed"
+
+
+def test_sql_repair_evidence_includes_previous_restore_diff_summary(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    case_plan = {
+        "sql_repair_attempts": [
+            {
+                "attempt": 1,
+                "status": "patched",
+                "actions": [{"type": "llm_regenerate_sql", "status": "patched", "file": "preset.sql"}],
+                "restore": {
+                    "status": "restored",
+                    "reason": "SQL dry-run validation failed",
+                    "files": ["preset.sql"],
+                    "case_plan_keys": ["insert_plans"],
+                },
+                "diff": {
+                    "files_changed": ["preset.sql"],
+                    "case_plan_keys_changed": ["insert_plans"],
+                },
+                "validation": {
+                    "kind": "sql_dry_run",
+                    "status": "failed",
+                    "attempt": 2,
+                    "failed_count": 1,
+                    "failure_reason": "bad account",
+                },
+                "llm_decision": {"failure_type": "preset_sql_execution_failed", "summary": "rewrite sql"},
+            }
+        ]
+    }
+
+    evidence = _collect_sql_repair_evidence(
+        case_plan,
+        case_dir,
+        2,
+        {"status": "failed", "failed_count": 1},
+    )
+
+    previous = evidence["previous_sql_repair_attempts"][0]
+    assert previous["actions"][0]["type"] == "llm_regenerate_sql"
+    assert previous["restore"]["reason"] == "SQL dry-run validation failed"
+    assert previous["diff"]["files_changed"] == ["preset.sql"]
+    assert previous["validation"]["failure_reason"] == "bad account"
 
 
 def test_plan_verify_marks_complete_for_required_sections(tmp_path):
@@ -2172,6 +2307,171 @@ def test_verify_applies_llm_regenerate_case_action_before_retry(tmp_path, monkey
     assert case_plan["verification"]["status"] == "passed"
 
 
+def test_verify_restores_llm_regenerate_case_when_retry_fails(tmp_path, monkeypatch):
+    skill = tmp_path / "skill"
+    case_dir = tmp_path / "case"
+    test_file = tmp_path / "test_preview.py"
+    case_dir.mkdir()
+    original_content = (
+        "def test_preview():\n"
+        "    rows = []\n"
+        "    assert len(rows) == 1\n"
+    )
+    test_file.write_text(original_content, encoding="utf-8")
+    (case_dir / "config.json").write_text("{}", encoding="utf-8")
+    (case_dir / "case_plan.json").write_text(
+        json.dumps(
+            {
+                "generated_tests": [str(test_file)],
+                "repair_policy": {"max_attempts": 1},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+    new_content = (
+        "def test_preview():\n"
+        "    rows = [1, 2]\n"
+        "    assert len(rows) == 2\n"
+    )
+
+    class Completed:
+        returncode = 1
+        stdout = "FAILED test_preview.py::test_preview - assertion still wrong"
+        stderr = ""
+
+    class Advisor:
+        def diagnose(self, evidence):
+            return {
+                "failure_type": "assertion_mismatch",
+                "confidence": 0.88,
+                "summary": "candidate case still fails",
+                "actions": [
+                    {
+                        "type": "regenerate_case",
+                        "file": str(test_file),
+                        "case_type": "preview",
+                        "reason": "replace assertion",
+                        "content": new_content,
+                    }
+                ],
+            }
+
+    def fake_run(*args, **kwargs):
+        calls.append(args)
+        return Completed()
+
+    monkeypatch.setattr("hui_agent.nodes.skill_steps.subprocess.run", fake_run)
+
+    result = build_default_step_handlers(skill, repair_advisor=Advisor())["4"](_state(case_dir))
+
+    case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
+    attempt = case_plan["repair_attempts"][0]
+    assert result.completed_steps == ["4"]
+    assert len(calls) == 2
+    assert test_file.read_text(encoding="utf-8") == original_content
+    assert attempt["actions"][0]["type"] == "llm_regenerate_case"
+    assert attempt["restore"]["status"] == "restored"
+    assert attempt["verification"]["phase"] == "target"
+    assert attempt["verification"]["returncode"] == 1
+
+
+def test_verify_restores_llm_regenerate_case_when_regression_fails(tmp_path, monkeypatch):
+    skill = tmp_path / "skill"
+    case_dir = tmp_path / "case"
+    failing_file = tmp_path / "test_preview.py"
+    passing_file = tmp_path / "test_queryall.py"
+    case_dir.mkdir()
+    original_content = (
+        "def test_preview():\n"
+        "    rows = []\n"
+        "    assert len(rows) == 1\n"
+    )
+    new_content = (
+        "def test_preview():\n"
+        "    rows = [1]\n"
+        "    assert len(rows) == 1\n"
+    )
+    failing_file.write_text(original_content, encoding="utf-8")
+    passing_file.write_text("def test_queryall():\n    assert True\n", encoding="utf-8")
+    (case_dir / "config.json").write_text("{}", encoding="utf-8")
+    (case_dir / "case_plan.json").write_text(
+        json.dumps(
+            {
+                "generated_tests": [str(failing_file), str(passing_file)],
+                "repair_policy": {"max_attempts": 1},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    class Completed:
+        def __init__(self, returncode: int, stdout: str):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
+
+    class Advisor:
+        def diagnose(self, evidence):
+            return {
+                "failure_type": "assertion_mismatch",
+                "confidence": 0.88,
+                "summary": "candidate fixes target only",
+                "actions": [
+                    {
+                        "type": "regenerate_case",
+                        "file": str(failing_file),
+                        "case_type": "preview",
+                        "reason": "replace preview assertion",
+                        "content": new_content,
+                    }
+                ],
+            }
+
+    def fake_run(command, *args, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            return Completed(
+                1,
+                f"FAILED {failing_file}::test_preview - AssertionError\n"
+                "============= 1 failed, 1 passed in 1.00s =============",
+            )
+        if len(calls) == 2:
+            return Completed(0, "============= 1 passed in 0.50s =============")
+        return Completed(
+            1,
+            f"FAILED {passing_file}::test_queryall - AssertionError\n"
+            "============= 1 failed, 1 passed in 1.00s =============",
+        )
+
+    monkeypatch.setattr("hui_agent.nodes.skill_steps.subprocess.run", fake_run)
+
+    result = build_default_step_handlers(skill, repair_advisor=Advisor())["4"](_state(case_dir))
+
+    case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
+    attempt = case_plan["repair_attempts"][0]
+    assert result.completed_steps == ["4"]
+    assert len(calls) == 3
+    assert calls[1] == [
+        sys.executable,
+        "-m",
+        "pytest",
+        f"{failing_file}::test_preview",
+        "-q",
+        f"--rootdir={tmp_path}",
+    ]
+    assert failing_file.read_text(encoding="utf-8") == original_content
+    assert attempt["actions"][0]["type"] == "llm_regenerate_case"
+    assert attempt["restore"]["status"] == "restored"
+    assert attempt["restore"]["reason"] == "regression pytest failed"
+    assert attempt["restore"]["files"][0].replace("\\", "/").endswith("test_preview.py")
+    assert attempt["verification"]["phase"] == "regression"
+    assert attempt["verification"]["returncode"] == 1
+
+
 def test_verify_repairs_duplicate_insert_keys_before_next_attempt(tmp_path, monkeypatch):
     skill = tmp_path / "skill"
     case_dir = tmp_path / "case"
@@ -2223,21 +2523,183 @@ def test_verify_repairs_duplicate_insert_keys_before_next_attempt(tmp_path, monk
     )
 
     class Completed:
-        returncode = 1
-        stdout = "ERROR (1062, \"Duplicate entry 'V1-000-C1' for key 'PRIMARY'\")"
-        stderr = ""
+        def __init__(self, returncode: int):
+            self.returncode = returncode
+            self.stdout = "ERROR (1062, \"Duplicate entry 'V1-000-C1' for key 'PRIMARY'\")" if returncode else "passed"
+            self.stderr = ""
 
-    monkeypatch.setattr("hui_agent.nodes.skill_steps.subprocess.run", lambda *args, **kwargs: Completed())
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(args)
+        return Completed(1 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr("hui_agent.nodes.skill_steps.subprocess.run", fake_run)
 
     build_default_step_handlers(skill)["4"](_state(case_dir))
 
     case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
     assert case_plan["repair_attempts"][0]["actions"][0]["type"] == "patch_duplicate_insert_keys"
+    assert case_plan["repair_attempts"][0]["restore"]["status"] == "kept"
     assert case_plan["insert_plans"][0]["rows"] is None
     sql = base_sql.read_text(encoding="utf-8")
     # repair 路径从旧 insert_plans 重建 SQL（dict 中无 db 字段时不加库前缀）
     assert sql.count("INSERT INTO tbvirbankaccmap") == 1
     assert "'100'" not in sql
+
+
+def test_verify_restores_duplicate_insert_key_repair_when_retry_fails(tmp_path, monkeypatch):
+    skill = tmp_path / "skill"
+    case_dir = tmp_path / "case"
+    sql_dir = tmp_path / "sql"
+    test_file = tmp_path / "test_generated.py"
+    case_dir.mkdir()
+    sql_dir.mkdir()
+    base_sql = sql_dir / "base.sql"
+    original_sql = "INSERT INTO tbvirbankaccmap(virtual_bank_acc, bank_no, in_client_no, open_branch) VALUES ('V1', '000', 'C1', '0011'), ('V1', '000', 'C1', '100');\n"
+    base_sql.write_text(original_sql, encoding="utf-8")
+    test_file.write_text("def test_generated():\n    assert False\n", encoding="utf-8")
+    original_insert_plans = [
+        {
+            "table": "tbvirbankaccmap",
+            "physical_table": "tbvirbankaccmap",
+            "role": "base",
+            "columns": [
+                {"name": "virtual_bank_acc", "value": "V1", "source": "test"},
+                {"name": "bank_no", "value": "000", "source": "test"},
+                {"name": "in_client_no", "value": "C1", "source": "test"},
+                {"name": "open_branch", "value": "0011", "source": "test"},
+            ],
+            "delete_where": "virtual_bank_acc = 'V1' AND bank_no = '000' AND in_client_no = 'C1'",
+            "rows": [
+                [
+                    {"name": "virtual_bank_acc", "value": "V1", "source": "test"},
+                    {"name": "bank_no", "value": "000", "source": "test"},
+                    {"name": "in_client_no", "value": "C1", "source": "test"},
+                    {"name": "open_branch", "value": "0011", "source": "test"},
+                ],
+                [
+                    {"name": "virtual_bank_acc", "value": "V1", "source": "test"},
+                    {"name": "bank_no", "value": "000", "source": "test"},
+                    {"name": "in_client_no", "value": "C1", "source": "test"},
+                    {"name": "open_branch", "value": "100", "source": "test"},
+                ],
+            ],
+        }
+    ]
+    (case_dir / "config.json").write_text("{}", encoding="utf-8")
+    (case_dir / "case_plan.json").write_text(
+        json.dumps(
+            {
+                "generated_tests": [str(test_file)],
+                "repair_policy": {"max_attempts": 1},
+                "sql_paths": {"base_sql": str(base_sql)},
+                "insert_plans": original_insert_plans,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    class Completed:
+        returncode = 1
+        stdout = "ERROR (1062, \"Duplicate entry 'V1-000-C1' for key 'PRIMARY'\")"
+        stderr = ""
+
+    def fake_run(*args, **kwargs):
+        calls.append(args)
+        return Completed()
+
+    monkeypatch.setattr("hui_agent.nodes.skill_steps.subprocess.run", fake_run)
+
+    build_default_step_handlers(skill)["4"](_state(case_dir))
+
+    case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
+    attempt = case_plan["repair_attempts"][0]
+    assert len(calls) == 2
+    assert base_sql.read_text(encoding="utf-8") == original_sql
+    assert case_plan["insert_plans"] == original_insert_plans
+    assert attempt["actions"][0]["type"] == "patch_duplicate_insert_keys"
+    assert attempt["restore"]["status"] == "restored"
+    assert attempt["restore"]["reason"] == "target pytest failed"
+    assert attempt["restore"]["files"][0].replace("\\", "/").endswith("base.sql")
+    assert attempt["restore"]["case_plan_keys"] == ["insert_plans"]
+
+
+def test_verify_restores_multi_file_llm_repair_when_retry_fails(tmp_path, monkeypatch):
+    skill = tmp_path / "skill"
+    case_dir = tmp_path / "case"
+    sql_dir = tmp_path / "sql"
+    test_file = tmp_path / "test_generated.py"
+    case_dir.mkdir()
+    sql_dir.mkdir()
+    preset_sql = sql_dir / "preset.sql"
+    original_sql = "INSERT INTO t(prd_code) VALUES ('OLD');\n"
+    original_test = "def test_generated():\n    assert False\n"
+    preset_sql.write_text(original_sql, encoding="utf-8")
+    test_file.write_text(original_test, encoding="utf-8")
+    new_sql = "INSERT INTO t(prd_code) VALUES ('NEW');\n"
+    new_test = "def test_generated():\n    rows = [1]\n    assert len(rows) == 1\n"
+    (case_dir / "config.json").write_text("{}", encoding="utf-8")
+    (case_dir / "case_plan.json").write_text(
+        json.dumps(
+            {
+                "generated_tests": [str(test_file)],
+                "sql_paths": {"preset_sql": str(preset_sql)},
+                "repair_policy": {"max_attempts": 1},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    class Completed:
+        returncode = 1
+        stdout = "FAILED test_generated.py::test_generated - still wrong"
+        stderr = ""
+
+    class Advisor:
+        def diagnose(self, evidence):
+            return {
+                "failure_type": "unknown",
+                "confidence": 0.7,
+                "summary": "try changing SQL and test",
+                "actions": [
+                    {
+                        "type": "regenerate_sql",
+                        "file": str(preset_sql),
+                        "reason": "replace stale SQL",
+                        "content": new_sql,
+                    },
+                    {
+                        "type": "regenerate_case",
+                        "file": str(test_file),
+                        "case_type": "query",
+                        "reason": "replace failing test",
+                        "content": new_test,
+                    },
+                ],
+            }
+
+    def fake_run(*args, **kwargs):
+        calls.append(args)
+        return Completed()
+
+    monkeypatch.setattr("hui_agent.nodes.skill_steps.subprocess.run", fake_run)
+
+    build_default_step_handlers(skill, repair_advisor=Advisor())["4"](_state(case_dir))
+
+    case_plan = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))
+    attempt = case_plan["repair_attempts"][0]
+    restored_files = {Path(path).name for path in attempt["restore"]["files"]}
+    assert len(calls) == 2
+    assert preset_sql.read_text(encoding="utf-8") == original_sql
+    assert test_file.read_text(encoding="utf-8") == original_test
+    assert [action["type"] for action in attempt["actions"]] == ["llm_regenerate_sql", "llm_regenerate_case"]
+    assert attempt["restore"]["status"] == "restored"
+    assert restored_files == {"preset.sql", "test_generated.py"}
 
 
 def test_pytest_attempt_summary_records_passed_and_failed_tests():
@@ -2386,3 +2848,77 @@ def test_report_includes_failed_repair_attempt_summary(tmp_path):
     assert "- 修复尝试次数: 3" in text
     assert "第1轮: status=patched, pytest=1, llm=SQL data mismatch, actions=patch_sql" in text
     assert "- 最后修复状态: no_action" in text
+
+
+def test_report_includes_repair_restore_and_validation_details(tmp_path):
+    skill = tmp_path / "skill"
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "config.json").write_text("{}", encoding="utf-8")
+    (case_dir / "case_plan.json").write_text(
+        json.dumps(
+            {
+                "menu": {"name": "菜单A"},
+                "verification": {"status": "failed", "returncode": 1},
+                "sql_repair_attempts": [
+                    {
+                        "attempt": 1,
+                        "status": "patched",
+                        "actions": [{"type": "llm_regenerate_sql"}],
+                        "sql_validation": {"status": "failed", "attempt": 1},
+                        "validation": {
+                            "kind": "sql_dry_run",
+                            "status": "failed",
+                            "attempt": 2,
+                            "failed_count": 1,
+                            "failure_reason": "bad SQL",
+                        },
+                        "restore": {
+                            "status": "restored",
+                            "reason": "SQL dry-run validation failed",
+                            "files": ["sql/preset.sql"],
+                            "case_plan_keys": ["insert_plans"],
+                        },
+                        "diff": {
+                            "files_changed": ["sql/preset.sql"],
+                            "case_plan_keys_changed": ["insert_plans"],
+                        },
+                    }
+                ],
+                "repair_attempts": [
+                    {
+                        "attempt": 1,
+                        "status": "patched",
+                        "actions": [{"type": "llm_regenerate_case"}],
+                        "pytest": {"returncode": 1},
+                        "llm_decision": {"summary": "candidate test"},
+                        "verification": {"kind": "pytest", "phase": "regression", "returncode": 1},
+                        "restore": {
+                            "status": "restored",
+                            "reason": "regression pytest failed",
+                            "files": ["test_preview.py", "preset.sql"],
+                            "case_plan_keys": [],
+                        },
+                        "diff": {
+                            "files_changed": ["test_preview.py", "preset.sql"],
+                            "case_plan_keys_changed": [],
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    build_default_step_handlers(skill)["5"](_state(case_dir))
+
+    text = (case_dir / "reports" / "summary.md").read_text(encoding="utf-8")
+    assert "- SQL dry-run 修复尝试次数: 1" in text
+    assert "## SQL dry-run 修复过程" in text
+    assert "验证: kind=sql_dry_run status=failed attempt=2 failed=1 reason=bad SQL" in text
+    assert "回滚: status=restored reason=SQL dry-run validation failed files=preset.sql case_plan=insert_plans" in text
+    assert "## pytest 修复过程" in text
+    assert "验证: kind=pytest phase=regression returncode=1" in text
+    assert "回滚: status=restored reason=regression pytest failed files=test_preview.py,preset.sql" in text
+    assert "变更: files=test_preview.py,preset.sql" in text

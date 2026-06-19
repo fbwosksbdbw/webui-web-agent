@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
+from hui_agent.doctor import run_doctor
 from hui_agent.graph import build_workflow
 from hui_agent.llm import (
     build_permission_advisor_from_env,
@@ -18,6 +19,22 @@ from hui_agent.nodes import build_default_step_handlers
 from hui_agent.run_store import RunStore
 from hui_agent.state import HUITestState
 from hui_agent.tools.script_runner import ScriptRunner
+
+SCHEMA_MODULE_DBS: dict[str, tuple[str, ...]] = {
+    "trust": ("ui_trust1", "ui_trust2"),
+    "dxtrust": ("ui_trust1", "ui_trust2"),
+    "信托": ("ui_trust1", "ui_trust2"),
+    "fund": ("ui_fund1", "ui_fund2"),
+    "dxfund": ("ui_fund1", "ui_fund2"),
+    "基金": ("ui_fund1", "ui_fund2"),
+    "fina": ("ui_fina1", "ui_fina2"),
+    "理财": ("ui_fina1", "ui_fina2"),
+    "dxcp": ("ui_dxcp1", "ui_dxcp2"),
+    "商业养老金": ("ui_dxcp1", "ui_dxcp2"),
+    "per": ("ui_per1", "ui_per2"),
+    "pension": ("ui_per1", "ui_per2"),
+    "个人养老金": ("ui_per1", "ui_per2"),
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,11 +57,20 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     subcommands.add_parser("menus")
+    doctor_parser = subcommands.add_parser("doctor", help="Run read-only environment diagnostics.")
+    doctor_parser.add_argument(
+        "--probe-cdp",
+        action="store_true",
+        help="Also probe the configured Chrome CDP endpoint.",
+    )
+    subcommands.add_parser("mcp", help="Start the optional MCP tool server for HUI page exploration.")
 
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("--menu", required=True)
+    _add_schema_refresh_args(run_parser)
 
-    subcommands.add_parser("batch")
+    batch_parser = subcommands.add_parser("batch")
+    _add_schema_refresh_args(batch_parser)
 
     status_parser = subcommands.add_parser("status")
     status_parser.add_argument("--thread-id", required=True)
@@ -59,6 +85,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_schema_refresh_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--refresh-schema-module",
+        action="append",
+        default=[],
+        choices=sorted(SCHEMA_MODULE_DBS),
+        help="Prewarm schema cache for a known business module before running.",
+    )
+    parser.add_argument(
+        "--refresh-schema-db",
+        action="append",
+        default=[],
+        help="Prewarm schema cache for an explicit database, e.g. ui_bc.",
+    )
+    parser.add_argument(
+        "--refresh-schema-force",
+        action="store_true",
+        help="Force DESCRIBE refresh even when tables are already cached.",
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -70,17 +117,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(runner.run_text("config_reader.py", ["menus"]))
         return 0
 
+    if args.command == "doctor":
+        result = run_doctor(runner, probe_cdp=args.probe_cdp)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1 if result["status"] == "error" else 0
+
+    if args.command == "mcp":
+        from hui_agent.mcp_server import run_mcp_server
+
+        try:
+            run_mcp_server(skill_root=args.skill_root)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+
     if args.command == "run":
         result = run_menu_runtime(
             args.menu,
             skill_root=args.skill_root,
             runs_root=args.runs_root,
             checkpoint_db=args.checkpoint_db,
+            refresh_schema_modules=args.refresh_schema_module,
+            refresh_schema_dbs=args.refresh_schema_db,
+            refresh_schema_force=args.refresh_schema_force,
         )
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "batch":
+        _prewarm_schema_cache(
+            runner,
+            store,
+            modules=args.refresh_schema_module,
+            dbs=args.refresh_schema_db,
+            force=args.refresh_schema_force,
+        )
         menus = _parse_menu_lines(runner.run_text("config_reader.py", ["menus"]))
         results = []
         for menu_name in menus:
@@ -144,6 +216,96 @@ def _load_default_env_files() -> None:
 
 def _parse_menu_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _schema_refresh_dbs(
+    modules: Sequence[str] | None = None,
+    dbs: Sequence[str] | None = None,
+) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for module in modules or []:
+        module_key = str(module).strip()
+        if module_key and module_key not in SCHEMA_MODULE_DBS:
+            known = ", ".join(sorted(SCHEMA_MODULE_DBS))
+            raise ValueError(f"Unknown schema module: {module_key}. Known modules: {known}")
+        for db in SCHEMA_MODULE_DBS.get(module_key, ()):
+            if db not in seen:
+                seen.add(db)
+                result.append(db)
+    for db in dbs or []:
+        value = str(db).strip()
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _prewarm_schema_cache(
+    runner: ScriptRunner,
+    store: RunStore,
+    *,
+    modules: Sequence[str] | None = None,
+    dbs: Sequence[str] | None = None,
+    force: bool = False,
+    thread_id: str = "PREWARM",
+) -> None:
+    target_dbs = _schema_refresh_dbs(modules, dbs)
+    if not target_dbs:
+        return
+    args = ["--auto", "--dbs", *target_dbs]
+    project_dir = _read_config_env_value(runner, "project_dir")
+    env_key = _read_config_env_value(runner, "env_key")
+    if project_dir:
+        args.extend(["--project-dir", project_dir])
+    if env_key:
+        args.extend(["--env", env_key])
+    if force:
+        args.append("--force")
+    _record_runtime_event(
+        store,
+        thread_id,
+        "SCHEMA",
+        "schema_prewarm_started",
+        f"dbs={','.join(target_dbs)} force={force}",
+        {"dbs": target_dbs, "modules": list(modules or []), "force": force},
+    )
+    try:
+        runner.run_text("build_schema_cache.py", args, timeout=600)
+    except Exception as exc:
+        _record_runtime_event(
+            store,
+            thread_id,
+            "SCHEMA",
+            "schema_prewarm_failed",
+            f"dbs={','.join(target_dbs)} error={exc}",
+            {"dbs": target_dbs, "modules": list(modules or []), "force": force, "error": str(exc)},
+        )
+        raise
+    _record_runtime_event(
+        store,
+        thread_id,
+        "SCHEMA",
+        "schema_prewarm_finished",
+        f"dbs={','.join(target_dbs)} force={force}",
+        {"dbs": target_dbs, "modules": list(modules or []), "force": force},
+    )
+
+
+def _read_config_env_value(runner: ScriptRunner, key: str) -> str:
+    try:
+        output = runner.run_text("config_reader.py", ["env", key], timeout=60)
+    except Exception:
+        return ""
+    prefix = f"{key} = "
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            value = stripped[len(prefix):].strip()
+            if value.startswith("<") or "请配置" in value:
+                return ""
+            return value
+    return ""
 
 
 def _summarize_batch(results: list[HUITestState]) -> dict[str, object]:
@@ -452,6 +614,9 @@ def run_menu_runtime(
     skill_root: str | None = None,
     runs_root: str = "runs",
     checkpoint_db: str = "runs/checkpoints.sqlite",
+    refresh_schema_modules: Sequence[str] | None = None,
+    refresh_schema_dbs: Sequence[str] | None = None,
+    refresh_schema_force: bool = False,
 ) -> HUITestState:
     """Execute a single menu through the full agent workflow.
 
@@ -467,6 +632,15 @@ def run_menu_runtime(
     store = RunStore(runs_root)
     store.write_event(state.thread_id, "START", "run_started", {"menu": menu_name})
     store.write_log_line(state.thread_id, "START", "run_started", f"menu={menu_name}")
+    runner = ScriptRunner(skill_root=skill_root)
+    _prewarm_schema_cache(
+        runner,
+        store,
+        modules=refresh_schema_modules,
+        dbs=refresh_schema_dbs,
+        force=refresh_schema_force,
+        thread_id=state.thread_id,
+    )
     result = _invoke_runtime(state, skill_root, checkpoint_db, store)
     store.write_result(result)
     store.write_event(

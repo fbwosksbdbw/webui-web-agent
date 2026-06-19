@@ -34,25 +34,7 @@ python "{SKILL_DIR}/scripts/config_reader.py" init "{菜单名}"
 1. **输出 JSON 到 stdout**：包含 `env`、`presets`、`menu`、`menu_url`、`module`、`paths`、`field_groups`
 2. **写入 `config.json`** 到用例目录（`{test_case_dir}/{二级菜单}/{菜单名}/config.json`），包含 Excel 三个 sheet 的完整快照 + 推导值
 
-### 3. 缓存预热（如有 `update_cache` 配置）
-
-从 `config.json` 的 `env.update_cache` 读取模块名（如 `信托`），映射到数据库并刷新缓存：
-
-| update_cache 值 | 数据库 |
-|:---:|:---:|
-| 信托 | ui_trust1, ui_trust2 |
-| 基金 | ui_fund1, ui_fund2 |
-| 理财 | ui_fina1, ui_fina2 |
-| 公共 | ui_bc |
-| 商业养老金 | ui_fina1, ui_fina2 |
-
-```bash
-MSYS_NO_PATHCONV=1 PYTHONIOENCODING=utf-8 python "{SKILL_DIR}/scripts/build_schema_cache.py" --auto --force --dbs ui_bc ui_trust1 ui_trust2
-```
-
-如果 `update_cache` 为空或不存在，跳过此步。
-
-### 4. 创建 case_plan.json
+### 3. 创建 case_plan.json
 
 `config.json` 是后续所有步骤读取 env/presets 的唯一来源，禁止再读 Excel。
 
@@ -101,7 +83,7 @@ MSYS_NO_PATHCONV=1 PYTHONIOENCODING=utf-8 python "{SKILL_DIR}/scripts/build_sche
 
 - [ ] `deploy_helpers.py` 已执行（common/helpers.py 已部署且为最新版本）
 - [ ] 已运行 `config_reader.py init`，config.json 已生成
-- [ ] 已检查 `update_cache` 并按需执行缓存预热
+- [ ] 已生成 `case_plan.json`
 - [ ] case_plan.json 已创建，menu / field_groups / paths 非空
 
 ## Exit

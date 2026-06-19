@@ -31,7 +31,7 @@ hui-playwright-agent/
 ├── knowledge/                        # 内置 skill 知识库和脚本资产
 │   ├── config/test_config.xlsx       # 环境、菜单、预埋数据配置
 │   ├── config/base_tables.json       # 基础表、产品表、参考数据
-│   ├── config/schema_cache.json      # 表结构缓存
+│   ├── config/cache/*.json           # 按库拆分的表结构缓存
 │   ├── scripts/                      # CDP、Stagehand、SQL、配置读取脚本
 │   └── README.md                     # 原 skill 资产说明
 ├── runs/                             # 执行事件、日志、状态和 checkpoint
@@ -77,6 +77,30 @@ npm install
 ```
 
 本项目是独立项目，Stagehand 依赖应安装在当前项目的 `knowledge/scripts/stagehand_explorer/node_modules` 下，不应依赖其他目录中的 `node_modules`。
+
+### MCP 工具服务（可选）
+
+如果需要把页面勘测能力暴露给支持 MCP 的 Agent，可安装可选依赖：
+
+```powershell
+python -m pip install -e ".[mcp]"
+```
+
+然后启动 MCP stdio server：
+
+```powershell
+python -m hui_agent.cli mcp
+```
+
+MCP 服务不会替代现有 workflow。它只是把已有 Stagehand/CDP 勘测能力包装成标准工具，当前暴露：
+
+| Tool | 作用 |
+|------|------|
+| `scan_form` | 扫描当前 HUI 页面表单，并可返回预埋数据匹配结果 |
+| `build_actions` | 根据表单字段生成确定性查询动作 |
+| `check_node` | 检查 Stagehand Node.js 依赖是否可用 |
+
+推荐架构是：LangGraph 继续负责编排，MCP 只作为浏览器勘测工具层；高风险的 SQL、pytest 和修复流程仍由确定性 workflow 控制。
 
 ## 配置
 
@@ -153,6 +177,18 @@ agent_config.yaml
 
 ## CLI 命令
 
+### 环境诊断
+
+```powershell
+python -m hui_agent.cli doctor
+```
+
+执行只读环境检查，输出 JSON。当前检查 Python、skill 脚本、Excel 配置读取、Stagehand Node 依赖、LLM 环境变量、schema cache、自动化项目 `conf/config.py` 等。需要额外探测 Chrome CDP 连通性时：
+
+```powershell
+python -m hui_agent.cli doctor --probe-cdp
+```
+
 ### 列出未完成菜单
 
 ```powershell
@@ -165,6 +201,12 @@ python -m hui_agent.cli menus
 
 ```powershell
 python -m hui_agent.cli run --menu "菜单名"
+```
+
+如需在执行前预热表结构缓存，可显式指定库或模块：
+
+```powershell
+python -m hui_agent.cli run --menu "菜单名" --refresh-schema-db ui_bc --refresh-schema-module trust --refresh-schema-force
 ```
 
 执行完成后输出状态 JSON。常用字段：
@@ -184,6 +226,14 @@ python -m hui_agent.cli run --menu "菜单名"
 ```powershell
 python -m hui_agent.cli batch
 ```
+
+批量执行前也可以只预热一次 schema cache，后续所有菜单复用缓存：
+
+```powershell
+python -m hui_agent.cli batch --refresh-schema-db ui_bc --refresh-schema-module fund --refresh-schema-force
+```
+
+`--refresh-schema-db` 精确指定数据库，公共库 `ui_bc` 也用该参数单独指定；`--refresh-schema-module` 是业务库快捷展开，不会自动包含 `ui_bc`。
 
 批量执行规则：
 
@@ -279,7 +329,7 @@ SQL 生成优先使用确定性数据：
 - 不依赖环境中随机存在的业务数据。
 - 系统表不做预埋，例如 `tsys_menu`、`tbsequence`。
 - 产品表、TA 表、行情表等基础依赖应在 `base_tables.json` 中维护完整参考记录。
-- 表结构优先使用缓存；缓存缺失时再查数据库刷新。
+- 表结构优先使用缓存；可在 `run`/`batch` 启动前用 `--refresh-schema-db` 或 `--refresh-schema-module` 显式预热，缓存缺失或 dry-run 失败时再做菜单级兜底刷新。
 - 预埋 SQL 必须通过事务回滚 dry-run。
 
 ## 用例生成规则

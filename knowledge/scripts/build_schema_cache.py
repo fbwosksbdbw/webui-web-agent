@@ -19,25 +19,6 @@ if hasattr(sys.stdout, 'reconfigure'):
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(SKILL_DIR, 'scripts'))
 
-def _read_db_mapping_dbs_from_excel() -> list:
-    """从 Excel「环境配置」sheet 读取 db_mapping_dbs 行，返回数据库名列表。"""
-    try:
-        from openpyxl import load_workbook
-        xlsx_path = os.path.join(SKILL_DIR, 'config', 'test_config.xlsx')
-        if not os.path.exists(xlsx_path):
-            return []
-        wb = load_workbook(xlsx_path, data_only=True)
-        ws = wb['环境配置']
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if row[0] == 'db_mapping_dbs' and row[1]:
-                dbs = [d.strip() for d in str(row[1]).split(',') if d.strip()]
-                wb.close()
-                return dbs
-        wb.close()
-    except Exception:
-        pass
-    return []
-
 def _find_project_root(project_dir: str = None) -> str:
     """查找项目根目录（conf/config.py 所在位置）。project_dir 优先，否则回退搜索。"""
     if project_dir and os.path.isdir(project_dir) and os.path.exists(os.path.join(project_dir, 'conf', 'config.py')):
@@ -353,11 +334,8 @@ def main():
         if args.dbs:
             dbs_to_discover = args.dbs
         else:
-            # 从 Excel 读取 db_mapping_dbs，无则用 DEFAULT_TABLES
-            dbs_to_discover = _read_db_mapping_dbs_from_excel()
-            if not dbs_to_discover:
-                dbs_to_discover = list(DEFAULT_TABLES.keys())
-            print(f"  数据库来源: Excel db_mapping_dbs ({len(dbs_to_discover)} 个)")
+            dbs_to_discover = list(DEFAULT_TABLES.keys())
+            print(f"  数据库来源: DEFAULT_TABLES ({len(dbs_to_discover)} 个)")
         # 先建映射（--auto 默认连带更新）
         print("=== 构建表→库映射 ===")
         build_table_db_mapping(dbs_to_discover)  # 不传 env_key，自动搜所有环境
@@ -367,7 +345,7 @@ def main():
         tables_by_db = {args.db: args.tables}
         build_cache(tables_by_db, clear=args.clear, env_key=args.env_key)
     elif args.build_mapping:
-        dbs = args.dbs if args.dbs else _read_db_mapping_dbs_from_excel() or list(DEFAULT_TABLES.keys())
+        dbs = args.dbs if args.dbs else list(DEFAULT_TABLES.keys())
         print(f"=== 构建表→库映射（{len(dbs)} 个数据库）===")
         build_table_db_mapping(dbs)  # 不传 env_key，自动搜所有环境
     else:

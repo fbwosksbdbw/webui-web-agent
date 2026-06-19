@@ -9,6 +9,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from hui_agent.repair_evidence import summarize_repair_attempts_for_evidence
+
 
 class JSONLLMClient(Protocol):
     def complete_json(self, *, system: str, user: str) -> dict[str, Any]:
@@ -235,7 +237,13 @@ def _env_int(name: str, default: int) -> int:
 def _compact_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     compact = dict(evidence)
     compact["query_log_tail"] = str(compact.get("query_log_tail", ""))[-6000:]
-    compact["previous_repair_attempts"] = compact.get("previous_repair_attempts", [])[-3:]
+    compact["previous_repair_attempts"] = summarize_repair_attempts_for_evidence(
+        compact.get("previous_repair_attempts", [])
+    )
+    if "previous_sql_repair_attempts" in compact:
+        compact["previous_sql_repair_attempts"] = summarize_repair_attempts_for_evidence(
+            compact.get("previous_sql_repair_attempts", [])
+        )
     compact["sql_files"] = [
         {
             **item,

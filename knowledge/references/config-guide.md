@@ -42,35 +42,20 @@
 
 ### 维护方式
 
-**方式 1：Excel「环境配置」sheet 配置 `db_mapping_dbs`（推荐）**
-
-在 `test_config.xlsx` 的「环境配置」sheet 中添加一行：
-
-| 配置项 | 配置值 | 说明 |
-|--------|--------|------|
-| `db_mapping_dbs` | `ui_bc,ui_dxcp1,ui_dxcp2,ui_fina1,...` | 逗号分隔的数据库列表 |
-
-然后执行：
-```bash
-python "{SKILL_DIR}/scripts/build_schema_cache.py" --build-mapping --project-dir "F:/python_project"
-```
-
-脚本自动从 Excel 读取 `db_mapping_dbs`，连接每个数据库执行 `SHOW TABLES`，更新 `table_db_mapping.json`。
-
-**方式 2：命令行指定 `--dbs`**
+**方式 1：命令行指定 `--dbs`**
 ```bash
 python "{SKILL_DIR}/scripts/build_schema_cache.py" --build-mapping --dbs ui_bc ui_dxcp1 ui_dxcp2 --project-dir "F:/python_project"
 ```
 
-**方式 3：`--auto` 模式（建映射 + 建缓存一步到位）**
+**方式 2：`--auto` 模式（建映射 + 建缓存一步到位）**
 ```bash
-python "{SKILL_DIR}/scripts/build_schema_cache.py" --auto --project-dir "F:/python_project"
+python "{SKILL_DIR}/scripts/build_schema_cache.py" --auto --dbs ui_bc ui_dxcp1 ui_dxcp2 --project-dir "F:/python_project"
 ```
 
 ### 前置条件
 
 - `conf/config.py` 的 `Config.env_dbs` 中必须有对应数据库的连接配置
-- `test_config.xlsx` 的 `project_dir` 必须已填写
+- `test_config.xlsx` 的 `project_dir` 必须已填写，或命令行显式传入 `--project-dir`
 - 各环境（`ifm60-trust`、`ifm60-dxfund` 等）的数据库配置分散在不同 env 中，`--build-mapping` 会自动遍历所有环境搜索
 
 ## config.json（Excel 快照）
@@ -237,7 +222,7 @@ AI 通过 `cdp_executor.py --login` 自动执行：
 ## 配置来源总览
 
 **从 `config.json` 读取**（Step 0a 由 `config_reader.py init` 写入，后续所有步骤使用）：
-- `env` — SSH 连接参数、日志路径、环境标识、`project_dir`、`update_cache`、`branch_user`、`branch_password`、`log_path_module_keywords`（模块推导映射）
+- `env` — SSH 连接参数、日志路径、环境标识、`project_dir`、`branch_user`、`branch_password`、`log_path_module_keywords`（模块推导映射）
 - `menu` — 菜单名称、导航一级/二级菜单、功能代码
 - `presets` — TA 代码、产品代码、客户标识、日期范围、机构编号等
 - `computed` — `menu_url`、`module`、`test_case_dir`

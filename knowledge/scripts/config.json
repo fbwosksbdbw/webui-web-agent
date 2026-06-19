@@ -13,7 +13,6 @@
     "log_file_stdout": "manager-stdout.log",
     "env_key": "ifm60-trust",
     "project_dir": "F:/python_project",
-    "update_cache": "信托",
     "cdp_url": "http://localhost:9222",
     "chrome_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     "branch_user": "fh001",

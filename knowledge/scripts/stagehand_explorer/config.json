@@ -13,7 +13,6 @@
     "log_file_stdout": "manager-stdout.log",
     "env_key": "ifm60-trust",
     "project_dir": "<请配置您的项目根目录>",
-    "update_cache": "信托",
     "cdp_url": "http://localhost:9222",
     "chrome_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     "login_url": "http://10.20.150.149:10622/console/#/login",
