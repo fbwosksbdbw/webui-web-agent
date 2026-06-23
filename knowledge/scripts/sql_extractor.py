@@ -2837,12 +2837,23 @@ def main():
 
     elif cmd == 'classify':
         if len(sys.argv) < 3:
-            print("用法: python sql_extractor.py classify <physical_tables_JSON|case_plan.json> [--routing-db DB] [--env ENV] [--project-dir DIR]")
+            print("用法: python sql_extractor.py classify <physical_tables_JSON|case_plan.json|--stdin> [--routing-db DB] [--env ENV] [--project-dir DIR]")
             sys.exit(1)
 
-        # Parse physical_tables from file or inline JSON
+        # Parse physical_tables from file, inline JSON, or stdin
         input_arg = sys.argv[2]
-        if os.path.exists(input_arg):
+        if input_arg == '--stdin':
+            data = json.load(sys.stdin)
+            if isinstance(data, dict) and 'shard' in data:
+                physical_tables = data['shard'].get('physical_tables', {})
+                routing_db = data['shard'].get('routing_db', data['shard'].get('db', ''))
+            elif isinstance(data, dict) and 'physical_tables' in data:
+                physical_tables = data['physical_tables']
+                routing_db = data.get('routing_db', data.get('db', ''))
+            else:
+                physical_tables = data
+                routing_db = ''
+        elif os.path.exists(input_arg):
             with open(input_arg, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             # Support both case_plan.json (extract shard.physical_tables) and raw tables

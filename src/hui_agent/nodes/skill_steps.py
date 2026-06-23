@@ -396,15 +396,14 @@ class SkillStepHandlers:
             computed = config.get("computed", {})
             cp = state.edit_case_plan()
             _apply_computed_shard_route(cp, computed, self.runner)
-            _write_json(case_plan_path, cp)
-            args = ["classify", str(case_plan_path)]
+            args = ["classify", "--stdin"]
             if env.get("env_key"):
                 args.extend(["--env", env["env_key"]])
             if env.get("project_dir"):
                 args.extend(["--project-dir", env["project_dir"]])
             if computed.get("module"):
                 args.extend(["--module", computed["module"]])
-            classified = self.runner.run_json("sql_extractor.py", args)
+            classified = self.runner.run_json_stdin("sql_extractor.py", args, cp)
             strategy = cp.setdefault("preset_strategy", {})
             template_base_tables = _base_template_tables(
                 cp.get("shard", {}).get("physical_tables", {}),
@@ -1877,13 +1876,13 @@ def _validate_sql_return_precheck(
         return precheck
     config = _load_json(config_path)
     db = _business_db_key(case_plan)
-    args = ["--case-plan", str(case_plan_path), "--config", str(config_path), "--db", db, "--json"]
+    args = ["--stdin", "--base-dir", str(case_plan_path.parent), "--config", str(config_path), "--db", db, "--json"]
     env_key = config.get("env", {}).get("env_key")
     if env_key:
         args.extend(["--env", str(env_key)])
     runner.emit({"event": "sql_return_precheck_started", "db": db})
     try:
-        raw = runner.run_json("sql_return_precheck.py", args, timeout=120)
+        raw = runner.run_json_stdin("sql_return_precheck.py", args, case_plan, timeout=120)
     except ScriptError as exc:
         raw = _parse_script_error_json(exc)
     status = "passed" if raw.get("ok") else "failed"

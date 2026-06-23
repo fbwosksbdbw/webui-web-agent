@@ -41,18 +41,28 @@ SYSTEM_SELECT_TABLES = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SQL return-row precheck")
-    parser.add_argument("--case-plan", required=True, help="case_plan.json path")
+    parser.add_argument("--case-plan", help="case_plan.json path (omit when using --stdin)")
+    parser.add_argument("--stdin", action="store_true", help="read case_plan JSON from stdin")
+    parser.add_argument("--base-dir", help="base directory for resolving relative SQL paths (used with --stdin)")
     parser.add_argument("--config", required=True, help="config.json path")
     parser.add_argument("--db", default="ui_bc", help="database key for backend SELECT")
     parser.add_argument("--env", help="override env key")
     parser.add_argument("--json", action="store_true", help="print JSON result")
     args = parser.parse_args()
 
+    if args.stdin:
+        case_plan_input = json.load(sys.stdin)
+    elif args.case_plan:
+        case_plan_input = Path(args.case_plan)
+    else:
+        parser.error("either --case-plan or --stdin is required")
+
     result = run_precheck(
-        case_plan_path=Path(args.case_plan),
+        case_plan=case_plan_input,
         config_path=Path(args.config),
         db_key=args.db,
         env_override=args.env,
+        base_dir=Path(args.base_dir) if args.base_dir else None,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -61,13 +71,24 @@ def main() -> None:
     raise SystemExit(0 if result.get("ok") else 1)
 
 
-def run_precheck(case_plan_path: Path, config_path: Path, db_key: str, env_override: str | None = None) -> dict:
-    case_plan = json.loads(case_plan_path.read_text(encoding="utf-8"))
+def run_precheck(
+    case_plan: "Path | dict",
+    config_path: Path,
+    db_key: str,
+    env_override: str | None = None,
+    base_dir: Path | None = None,
+) -> dict:
+    if isinstance(case_plan, Path):
+        if base_dir is None:
+            base_dir = case_plan.parent
+        case_plan = json.loads(case_plan.read_text(encoding="utf-8"))
+    if base_dir is None:
+        base_dir = Path.cwd()
     raw_sqls = _candidate_selects(case_plan)
     if not raw_sqls:
         return {"ok": True, "status": "skipped", "reason": "no raw SELECT SQL available", "checks": []}
 
-    sql_file_map = _sql_file_map(case_plan, case_plan_path.parent)
+    sql_file_map = _sql_file_map(case_plan, base_dir)
     if not sql_file_map:
         return {"ok": True, "status": "skipped", "reason": "no SQL files to execute", "checks": []}
 

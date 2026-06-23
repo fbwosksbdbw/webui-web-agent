@@ -1224,8 +1224,8 @@ def test_table_classify_uses_computed_customer_shard_as_routing_db(tmp_path):
     )
     _write_script(
         skill / "scripts" / "sql_extractor.py",
-        "import json, pathlib, sys\n"
-        "cp = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))\n"
+        "import json, sys\n"
+        "cp = json.load(sys.stdin)\n"
         "assert cp['shard']['routing_db'] == 'ui_fund2'\n"
         "print(json.dumps({'tbdxfundtranscfm': {'classification': 'business', 'db': 'ui_fund2'}}, ensure_ascii=False))\n",
     )
@@ -1233,7 +1233,7 @@ def test_table_classify_uses_computed_customer_shard_as_routing_db(tmp_path):
     state = HUITestState.new("菜单A").with_paths(
         config_path=str(config_path),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     result = build_default_step_handlers(skill)["2b"](state)
 

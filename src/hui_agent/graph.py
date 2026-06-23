@@ -9,7 +9,7 @@ from hui_agent.state import HUITestState, STEP_ORDER
 # Steps whose subprocess scripts read case_plan.json from disk.
 # The wrapper will sync state.case_plan to disk *before* these steps run.
 # Step 1b is excluded: its handler manages its own sync/write-back/reload cycle.
-_STEPS_NEEDING_DISK_SYNC: frozenset[str] = frozenset({"2b", "2c"})
+_STEPS_NEEDING_DISK_SYNC: frozenset[str] = frozenset()
 
 # Steps whose subprocess scripts may write back to case_plan.json.
 # The wrapper will reload state.case_plan from disk *after* these steps run.

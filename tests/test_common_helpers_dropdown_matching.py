@@ -10,21 +10,17 @@ def _load_helpers(path: Path):
     return module
 
 
-def _helper_paths():
-    root = Path(__file__).resolve().parents[2]
-    return [
-        root / "assets" / "common" / "helpers.py",
-        root / "hui-playwright-agent" / "knowledge" / "assets" / "common" / "helpers.py",
-    ]
+def _helper_path() -> Path:
+    root = Path(__file__).resolve().parents[1]
+    return root / "knowledge" / "assets" / "common" / "helpers.py"
 
 
 def test_common_helper_dropdown_matcher_rejects_pagination_and_substring_noise():
-    for path in _helper_paths():
-        module = _load_helpers(path)
+    module = _load_helpers(_helper_path())
 
-        assert module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "UI_HT_P001:UI自动化HT信托产品")
-        assert module._dropdown_option_matches("UI_HT_P001", "UI_HT_P001:UI自动化HT信托产品")
-        assert module._dropdown_option_matches("UI自动化HT信托产品", "UI_HT_P001:UI自动化HT信托产品")
-        assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "10 条/页")
-        assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "共 12 条 10 条/页")
-        assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "UI_HT_P001 搜索")
+    assert module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "UI_HT_P001:UI自动化HT信托产品")
+    assert module._dropdown_option_matches("UI_HT_P001", "UI_HT_P001:UI自动化HT信托产品")
+    assert module._dropdown_option_matches("UI自动化HT信托产品", "UI_HT_P001:UI自动化HT信托产品")
+    assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "10 条/页")
+    assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "共 12 条 10 条/页")
+    assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "UI_HT_P001 搜索")

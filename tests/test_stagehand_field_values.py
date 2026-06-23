@@ -10,33 +10,29 @@ def _load_explore_wrapper(path: Path):
     return module
 
 
-def _wrapper_paths():
-    root = Path(__file__).resolve().parents[2]
-    return [
-        root / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
-        root / "hui-playwright-agent" / "knowledge" / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py",
-    ]
+def _wrapper_path():
+    root = Path(__file__).resolve().parents[1]
+    return root / "knowledge" / "scripts" / "stagehand_explorer" / "src" / "explore_wrapper.py"
 
 
 def test_select_preset_wins_when_explored_options_are_stale():
-    for path in _wrapper_paths():
-        wrapper = _load_explore_wrapper(path)
+    wrapper = _load_explore_wrapper(_wrapper_path())
 
-        result = wrapper.generate_field_values(
-            [
-                {
-                    "label": "产品代码",
-                    "type": "single-select",
-                    "is_required": False,
-                    "options": ["11:AI自动化测试产品"],
-                }
-            ],
-            {"prd_code": {"name": "产品代码", "value": "UI_HT_P001:UI自动化HT信托产品"}},
-        )
+    result = wrapper.generate_field_values(
+        [
+            {
+                "label": "产品代码",
+                "type": "single-select",
+                "is_required": False,
+                "options": ["11:AI自动化测试产品"],
+            }
+        ],
+        {"prd_code": {"name": "产品代码", "value": "UI_HT_P001:UI自动化HT信托产品"}},
+    )
 
-        field = result["all"][0]
-        assert field["value"] == "UI_HT_P001:UI自动化HT信托产品"
-        assert field["value_source"] == "preset"
+    field = result["all"][0]
+    assert field["value"] == "UI_HT_P001:UI自动化HT信托产品"
+    assert field["value_source"] == "preset"
 
 
 def test_stagehand_explorer_invokes_locator_first_method():
