@@ -36,6 +36,9 @@ SCHEMA_MODULE_DBS: dict[str, tuple[str, ...]] = {
     "个人养老金": ("ui_per1", "ui_per2"),
 }
 
+DEFAULT_RUNS_ROOT = "_local/runs"
+DEFAULT_CHECKPOINT_DB = "_local/runs/checkpoints.sqlite"
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hui-agent")
@@ -46,12 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--runs-root",
-        default="runs",
+        default=DEFAULT_RUNS_ROOT,
         help="Directory for per-thread events.jsonl and result.json files.",
     )
     parser.add_argument(
         "--checkpoint-db",
-        default="runs/checkpoints.sqlite",
+        default=DEFAULT_CHECKPOINT_DB,
         help="SQLite checkpoint DB used when langgraph-checkpoint-sqlite is installed.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -612,8 +615,8 @@ def run_menu_runtime(
     menu_name: str,
     *,
     skill_root: str | None = None,
-    runs_root: str = "runs",
-    checkpoint_db: str = "runs/checkpoints.sqlite",
+    runs_root: str = DEFAULT_RUNS_ROOT,
+    checkpoint_db: str = DEFAULT_CHECKPOINT_DB,
     refresh_schema_modules: Sequence[str] | None = None,
     refresh_schema_dbs: Sequence[str] | None = None,
     refresh_schema_force: bool = False,

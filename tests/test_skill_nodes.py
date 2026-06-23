@@ -474,7 +474,7 @@ def test_log_capture_uses_planned_querymulti_fields_instead_of_all_fields(tmp_pa
         config_path=str(config_path),
         case_dir=str(case_dir),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     result = build_default_step_handlers(skill)["1b"](state)
 
@@ -544,7 +544,7 @@ def test_log_capture_runs_non_blocking_sql_probe_for_extra_stable_fields(tmp_pat
         config_path=str(config_path),
         case_dir=str(case_dir),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     result = build_default_step_handlers(skill)["1b"](state)
 
@@ -617,7 +617,7 @@ def test_log_capture_runs_full_stable_survey_probe_without_polluting_main_query(
         config_path=str(config_path),
         case_dir=str(case_dir),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     result = build_default_step_handlers(skill)["1b"](state)
 
@@ -731,7 +731,7 @@ def test_log_capture_probes_customer_identity_group_with_and_without_bound_field
         config_path=str(config_path),
         case_dir=str(case_dir),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     result = build_default_step_handlers(skill)["1b"](state)
 
@@ -808,7 +808,7 @@ def test_log_capture_probes_implicit_customer_identity_group_without_configured_
         config_path=str(config_path),
         case_dir=str(case_dir),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     result = build_default_step_handlers(skill)["1b"](state)
 
@@ -877,7 +877,7 @@ def test_log_capture_skips_duplicate_sql_probe_field_sets(tmp_path):
         config_path=str(config_path),
         case_dir=str(case_dir),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     build_default_step_handlers(skill)["1b"](state)
 
@@ -958,7 +958,7 @@ def test_log_capture_probes_account_type_and_account_bound_alias_group(tmp_path)
         config_path=str(config_path),
         case_dir=str(case_dir),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     result = build_default_step_handlers(skill)["1b"](state)
 
@@ -1280,7 +1280,7 @@ def test_table_classify_writes_routed_ast_diagnostic_sql(tmp_path):
     state = HUITestState.new("菜单A").with_paths(
         config_path=str(config_path),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     build_default_step_handlers(skill)["2b"](state)
 
@@ -1331,7 +1331,7 @@ def test_table_classify_applies_llm_sql_no_insert_tables_safely(tmp_path):
     state = HUITestState.new("菜单A").with_paths(
         config_path=str(config_path),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     build_default_step_handlers(skill, sql_advisor=SQLAdvisor())["2b"](state)
 
@@ -1407,7 +1407,7 @@ def test_sql_generate_refreshes_schema_cache_on_dry_run_failure(tmp_path):
         config_path=str(config_path),
         case_dir=str(case_dir),
         case_plan_path=str(case_plan_path),
-    )
+    ).merge(case_plan=json.loads(case_plan_path.read_text(encoding="utf-8")))
 
     # Run sql_generate step — it should attempt dry-run, fail, refresh cache, then fail again
     try:

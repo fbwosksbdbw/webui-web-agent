@@ -1,7 +1,7 @@
 runtime:
   skill_root: ./knowledge
-  runs_root: ./runs
-  checkpoint_db: ./runs/checkpoints.sqlite
+  runs_root: ./_local/runs
+  checkpoint_db: ./_local/runs/checkpoints.sqlite
   serial_browser: true
 
 models:

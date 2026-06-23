@@ -34,7 +34,9 @@ hui-playwright-agent/
 │   ├── config/cache/*.json           # 按库拆分的表结构缓存
 │   ├── scripts/                      # CDP、Stagehand、SQL、配置读取脚本
 │   └── README.md                     # 原 skill 资产说明
-├── runs/                             # 执行事件、日志、状态和 checkpoint
+├── _local/                           # 本机运行产物和缓存，不提交版本库
+│   ├── runs/                         # 执行事件、日志、状态和 checkpoint
+│   └── pytest_cache/                 # pytest 缓存
 └── tests/                            # 单元测试和集成测试
 ```
 
@@ -376,7 +378,7 @@ SQL 预埋文件通常位于：
 Agent 运行日志位于：
 
 ```text
-<agent_root>/runs/<thread_id>/
+<agent_root>/_local/runs/<thread_id>/
 ├── events.jsonl
 ├── result.json
 ├── agent.log
@@ -386,8 +388,8 @@ Agent 运行日志位于：
 排障建议查看顺序：
 
 1. 控制台实时日志。
-2. `<agent_root>/runs/<thread_id>/agent.log`。
-3. `<agent_root>/runs/<thread_id>/events.jsonl`。
+2. `<agent_root>/_local/runs/<thread_id>/agent.log`。
+3. `<agent_root>/_local/runs/<thread_id>/events.jsonl`。
 4. 当前菜单的 `case_plan.json`。
 5. 当前菜单 SQL 文件和 `query_log.txt`。
 
@@ -514,6 +516,7 @@ python -m pytest -q
 ```powershell
 cd <agent_root>
 python -m pip install -e ".[dev]"
+python -m hui_agent.cli doctor
 python -m hui_agent.cli menus
 python -m hui_agent.cli run --menu "菜单名"
 python -m hui_agent.cli status --thread-id <thread_id>

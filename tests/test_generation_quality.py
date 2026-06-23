@@ -971,7 +971,7 @@ def test_case_generate_uses_skill_directory_suffixes(tmp_path):
         config_path=str(case_dir / "config.json"),
         case_plan_path=str(case_dir / "case_plan.json"),
         case_dir=str(case_dir),
-    )
+    ).merge(case_plan=json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8")))
     result = build_default_step_handlers(skill)["3"](state)
 
     generated = json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8"))["generated_tests"]
@@ -1027,7 +1027,7 @@ def test_case_generate_removes_stale_generated_case_files(tmp_path):
         config_path=str(case_dir / "config.json"),
         case_plan_path=str(case_dir / "case_plan.json"),
         case_dir=str(case_dir),
-    )
+    ).merge(case_plan=json.loads((case_dir / "case_plan.json").read_text(encoding="utf-8")))
     build_default_step_handlers(skill)["3"](state)
 
     assert not legacy_branch.exists()
