@@ -64,16 +64,18 @@ class SkillStepHandlers:
         config_path = _extract_config_path(output)
         case_dir = str(Path(config_path).parent) if config_path else state.case_dir
         case_plan_path = str(Path(case_dir) / "case_plan.json") if case_dir else ""
-        if config_path:
-            _write_initial_case_plan(Path(config_path), Path(case_plan_path))
-        return (
+        new_state = (
             state.with_paths(
                 config_path=config_path,
                 case_plan_path=case_plan_path,
                 case_dir=case_dir,
             )
-            .mark_completed("0a")
         )
+        if config_path:
+            initial_plan = _build_initial_case_plan(Path(config_path))
+            _write_json(Path(case_plan_path), initial_plan)
+            new_state = new_state.update_case_plan(initial_plan)
+        return new_state.mark_completed("0a")
 
     def browser_login(self, state: HUITestState) -> HUITestState:
         try:
@@ -112,30 +114,30 @@ class SkillStepHandlers:
                 raise EnvironmentFailure(
                     "form scan returned 0 fields; browser is likely not on the target menu page"
                 )
-            case_plan = _load_json(case_plan_path)
+            cp = state.edit_case_plan()
             config = _load_json(Path(config_path))
-            case_plan["presets"] = config.get("presets", case_plan.get("presets", {}))
-            case_plan["preset_fields"] = config.get("preset_fields", case_plan.get("preset_fields", {}))
-            case_plan.setdefault("form_fields", {})
-            case_plan["form_fields"].update(
+            cp["presets"] = config.get("presets", cp.get("presets", {}))
+            cp["preset_fields"] = config.get("preset_fields", cp.get("preset_fields", {}))
+            cp.setdefault("form_fields", {})
+            cp["form_fields"].update(
                 {
                     "all": form_fields.get("all", []),
                     "required": form_fields.get("required", []),
                     "excluded_fields": form_fields.get("excluded_fields", []),
                 }
             )
-            case_plan["case_inputs"] = _plan_case_inputs(
+            cp["case_inputs"] = _plan_case_inputs(
                 form_fields.get("all", []),
-                case_plan.get("field_groups", []),
-                case_plan.get("preset_fields", {}),
+                cp.get("field_groups", []),
+                cp.get("preset_fields", {}),
             )
-            _write_json(case_plan_path, case_plan)
+            _write_json(case_plan_path, cp)
             summary = {
                 "field_count": len(form_fields.get("all", [])),
                 "required_count": len(form_fields.get("required", [])),
                 "excluded_count": len(form_fields.get("excluded_fields", [])),
             }
-            return state.merge(form_fields_summary=summary).mark_completed("1a")
+            return state.update_case_plan(cp).merge(form_fields_summary=summary).mark_completed("1a")
         except (EnvironmentFailure, MenuFailure):
             raise
         except Exception as exc:
@@ -147,12 +149,12 @@ class SkillStepHandlers:
             case_dir = Path(_require_path(state.case_dir, "case_dir"))
             case_plan_path = Path(_require_path(state.case_plan_path, "case_plan_path"))
             config = _load_json(Path(config_path))
-            case_plan = _load_json(case_plan_path)
+            cp = state.edit_case_plan()
             fields_path = case_dir / "form_fields_all.json"
             actions_path = case_dir / "actions_query.json"
             query_log_path = case_dir / "query_log.txt"
             explore_path = case_dir / "explore_result.json"
-            capture_fields = _query_capture_fields(case_plan)
+            capture_fields = _query_capture_fields(cp)
             _write_json_list(fields_path, capture_fields)
             actions = self.runner.run_json_value("config_reader.py", ["build_actions", str(fields_path)])
             _write_json_list(actions_path, _actions_with_initial_reset(actions))
@@ -181,15 +183,17 @@ class SkillStepHandlers:
             if env.get("app_server_password"):
                 args.extend(["--ssh-pass", env["app_server_password"]])
             args.extend(["--log-grep", "(Actual SQL|当前SQL)"])
+            # Sync state.case_plan to disk so CDP executor can write back
+            _write_json(case_plan_path, cp)
             self.runner.run_text("cdp_executor.py", args)
             # CDP 执行完后，form_fields.all 已被 write-back 更新为实际值。
             # 重新加载 case_plan，将实际值同步到 case_inputs（用例生成的数据源）。
-            case_plan = _load_json(case_plan_path)
-            _sync_case_inputs_from_form_fields(case_plan)
-            _write_json(case_plan_path, case_plan)
+            cp = _load_json(case_plan_path)
+            _sync_case_inputs_from_form_fields(cp)
+            _write_json(case_plan_path, cp)
             _ensure_sql_log_not_empty(query_log_path)
             self._run_sql_probe(
-                case_plan=case_plan,
+                case_plan=cp,
                 case_plan_path=case_plan_path,
                 case_dir=case_dir,
                 config_path=config_path,
@@ -198,7 +202,7 @@ class SkillStepHandlers:
                 base_fields=capture_fields,
                 query_log_path=query_log_path,
             )
-            return state.mark_completed("1b")
+            return state.update_case_plan(cp).mark_completed("1b")
         except Exception as exc:
             raise MenuFailure(str(exc)) from exc
 
@@ -358,11 +362,11 @@ class SkillStepHandlers:
             case_plan_path = Path(_require_path(state.case_plan_path, "case_plan_path"))
             query_log_path = case_dir / "query_log.txt"
             analysis = self.runner.run_json("sql_extractor.py", ["analyze", str(query_log_path)])
-            case_plan = _load_json(case_plan_path)
+            cp = state.edit_case_plan()
             physical_tables, filtered_system_tables = _filter_system_physical_tables(
                 analysis.get("physical_tables", {})
             )
-            case_plan["log_analysis"] = {
+            cp["log_analysis"] = {
                 "requirements": _filter_system_requirements(analysis.get("requirements", {})),
                 "cached_tables": _filter_system_table_list(analysis.get("cached_tables", [])),
                 "missing_tables": _filter_system_table_list(analysis.get("missing_tables", [])),
@@ -371,15 +375,15 @@ class SkillStepHandlers:
             }
             ast_artifacts = _write_ast_diagnostic_artifacts(case_dir, analysis.get("ast_diagnostics"))
             if ast_artifacts:
-                case_plan["log_analysis"]["ast_artifacts"] = ast_artifacts
-                case_plan["log_analysis"]["ast_summary"] = {
+                cp["log_analysis"]["ast_artifacts"] = ast_artifacts
+                cp["log_analysis"]["ast_summary"] = {
                     "select_count": analysis.get("ast_diagnostics", {}).get("select_count", 0),
                 }
-            case_plan.setdefault("shard", {})
+            cp.setdefault("shard", {})
             if physical_tables:
-                case_plan["shard"]["physical_tables"] = physical_tables
-            _write_json(case_plan_path, case_plan)
-            return state.merge(shard=case_plan.get("shard", {})).mark_completed("2a")
+                cp["shard"]["physical_tables"] = physical_tables
+            _write_json(case_plan_path, cp)
+            return state.update_case_plan(cp).merge(shard=cp.get("shard", {})).mark_completed("2a")
         except Exception as exc:
             raise MenuFailure(str(exc)) from exc
 
@@ -390,21 +394,19 @@ class SkillStepHandlers:
             config = _load_json(config_path)
             env = config.get("env", {})
             computed = config.get("computed", {})
-            case_plan = _load_json(case_plan_path)
-            _apply_computed_shard_route(case_plan, computed, self.runner)
-            _write_json(case_plan_path, case_plan)
-            args = ["classify", str(case_plan_path)]
+            cp = state.edit_case_plan()
+            _apply_computed_shard_route(cp, computed, self.runner)
+            args = ["classify", "--stdin"]
             if env.get("env_key"):
                 args.extend(["--env", env["env_key"]])
             if env.get("project_dir"):
                 args.extend(["--project-dir", env["project_dir"]])
             if computed.get("module"):
                 args.extend(["--module", computed["module"]])
-            classified = self.runner.run_json("sql_extractor.py", args)
-            case_plan = _load_json(case_plan_path)
-            strategy = case_plan.setdefault("preset_strategy", {})
+            classified = self.runner.run_json_stdin("sql_extractor.py", args, cp)
+            strategy = cp.setdefault("preset_strategy", {})
             template_base_tables = _base_template_tables(
-                case_plan.get("shard", {}).get("physical_tables", {}),
+                cp.get("shard", {}).get("physical_tables", {}),
                 load_base_tables(self.runner.skill_root),
             )
             strategy["base_tables"] = _dedupe(
@@ -423,20 +425,20 @@ class SkillStepHandlers:
                 )
             )
             strategy["preset_tables"] = strategy["base_tables"] + strategy["biz_tables"]
-            case_plan.setdefault("shard", {})
+            cp.setdefault("shard", {})
             business_dbs = [
                 value.get("db")
                 for value in classified.values()
                 if value.get("classification") == "business" and value.get("db")
             ]
-            routing_db = case_plan.get("shard", {}).get("routing_db", "")
-            case_plan["shard"]["db"] = business_dbs[0] if business_dbs else (routing_db or "ui_bc")
-            _apply_sql_advisor_decision(case_plan, self.sql_advisor)
-            _write_routed_ast_diagnostic_artifact(case_plan, case_plan_path.parent)
-            _write_json(case_plan_path, case_plan)
-            return state.merge(
+            routing_db = cp.get("shard", {}).get("routing_db", "")
+            cp["shard"]["db"] = business_dbs[0] if business_dbs else (routing_db or "ui_bc")
+            _apply_sql_advisor_decision(cp, self.sql_advisor)
+            _write_routed_ast_diagnostic_artifact(cp, case_plan_path.parent)
+            _write_json(case_plan_path, cp)
+            return state.update_case_plan(cp).merge(
                 preset_strategy=strategy,
-                shard=case_plan.get("shard", {}),
+                shard=cp.get("shard", {}),
             ).mark_completed("2b")
         except Exception as exc:
             raise MenuFailure(str(exc)) from exc
@@ -444,56 +446,56 @@ class SkillStepHandlers:
     def sql_generate(self, state: HUITestState) -> HUITestState:
         try:
             case_plan_path = Path(_require_path(state.case_plan_path, "case_plan_path"))
-            case_plan = _load_json(case_plan_path)
+            cp = state.edit_case_plan()
             config = {}
             if state.config_path:
                 config = _load_json(Path(state.config_path))
-                case_plan["presets"] = config.get("presets", case_plan.get("presets", {}))
-            sql_paths = _resolve_sql_paths(case_plan, config)
+                cp["presets"] = config.get("presets", cp.get("presets", {}))
+            sql_paths = _resolve_sql_paths(cp, config)
             if not _has_valid_sql_paths(sql_paths):
                 try:
                     sql_paths = self.runner.run_json("config_reader.py", ["sql_paths", state.menu_name])
                 except Exception:
                     sql_paths = {}
             if not _has_valid_sql_paths(sql_paths):
-                sql_paths = _derive_sql_paths(case_plan, config)
+                sql_paths = _derive_sql_paths(cp, config)
             if not _has_valid_sql_paths(sql_paths):
                 raise MenuFailure(f"unable to resolve SQL output paths: {sql_paths}")
             local_sql_paths = _resolve_path_map(sql_paths, case_plan_path.parent)
-            case_plan["sql_paths"] = _artifact_path_map(local_sql_paths, case_plan_path.parent)
+            cp["sql_paths"] = _artifact_path_map(local_sql_paths, case_plan_path.parent)
             schema_cache = load_schema_cache(self.runner.skill_root)
             base_tables = load_base_tables(self.runner.skill_root)
             table_db_mapping = _load_table_db_mapping(self.runner.skill_root)
-            case_plan["sql_requirements"] = [
+            cp["sql_requirements"] = [
                 requirement.to_dict()
-                for requirement in build_sql_requirements(case_plan, schema_cache=schema_cache)
+                for requirement in build_sql_requirements(cp, schema_cache=schema_cache)
             ]
             plans, skipped = build_insert_plans(
-                case_plan,
+                cp,
                 schema_cache=schema_cache,
                 base_tables=base_tables,
                 include_skipped=True,
                 table_db_mapping=table_db_mapping,
             )
             if _has_missing_schema(skipped):
-                _refresh_schema_cache_for_missing_tables(self.runner, case_plan, config, skipped)
+                _refresh_schema_cache_for_missing_tables(self.runner, cp, config, skipped)
                 schema_cache = load_schema_cache(self.runner.skill_root)
-                case_plan["sql_requirements"] = [
+                cp["sql_requirements"] = [
                     requirement.to_dict()
-                    for requirement in build_sql_requirements(case_plan, schema_cache=schema_cache)
+                    for requirement in build_sql_requirements(cp, schema_cache=schema_cache)
                 ]
                 plans, skipped = build_insert_plans(
-                    case_plan,
+                    cp,
                     schema_cache=schema_cache,
                     base_tables=base_tables,
                     include_skipped=True,
                     table_db_mapping=table_db_mapping,
                 )
-                _write_json(case_plan_path, case_plan)
-            case_plan["insert_plans"] = [plan.to_dict() for plan in plans]
-            case_plan["insert_plan_skipped"] = skipped
-            coverage = evaluate_insert_plan_coverage(case_plan, plans, skipped)
-            case_plan["sql_coverage"] = coverage
+                _write_json(case_plan_path, cp)
+            cp["insert_plans"] = [plan.to_dict() for plan in plans]
+            cp["insert_plan_skipped"] = skipped
+            coverage = evaluate_insert_plan_coverage(cp, plans, skipped)
+            cp["sql_coverage"] = coverage
             self.runner.emit(
                 {
                     "event": "sql_coverage_checked",
@@ -504,11 +506,11 @@ class SkillStepHandlers:
                 }
             )
             if coverage.get("status") == "failed" and plans:
-                _write_json(case_plan_path, case_plan)
+                _write_json(case_plan_path, cp)
                 raise MenuFailure(coverage.get("failure_reason") or "SQL coverage gate failed")
             if not plans:
                 repair = _repair_failed_insert_plan_generation(
-                    case_plan,
+                    cp,
                     case_plan_path.parent,
                     1,
                     skipped,
@@ -516,7 +518,7 @@ class SkillStepHandlers:
                     skill_root=self.runner.skill_root,
                     event_logger=self.runner.emit,
                 )
-                case_plan.setdefault("sql_repair_attempts", []).append(repair)
+                cp.setdefault("sql_repair_attempts", []).append(repair)
                 self.runner.emit(
                     {
                         "event": "sql_repair_attempt_recorded",
@@ -528,29 +530,29 @@ class SkillStepHandlers:
                 )
                 if _has_applied_repair_action(repair.get("actions", [])):
                     validation = _validate_sql_files_with_repair(
-                        case_plan,
+                        cp,
                         case_plan_path.parent,
                         Path(state.config_path) if state.config_path else None,
                         self.runner,
                         self.repair_advisor,
                     )
-                    _write_json(case_plan_path, case_plan)
+                    _write_json(case_plan_path, cp)
                     if validation.get("status") == "failed":
                         raise MenuFailure(validation.get("failure_reason") or "SQL dry-run validation failed")
-                    return state.merge(sql_paths=local_sql_paths).mark_completed("2c")
-                _write_json(case_plan_path, case_plan)
+                    return state.update_case_plan(cp).merge(sql_paths=local_sql_paths).mark_completed("2c")
+                _write_json(case_plan_path, cp)
                 _ensure_insert_plans_not_empty(plans, skipped)
-            permission_decision = _judge_permission_filter(case_plan, plans, skipped, self.permission_advisor)
-            case_plan["permission_decision"] = permission_decision
-            if permission_decision.get("has_branch_permission_filter") and _has_permission_rows_for_filtered_tables(case_plan, plans):
-                _apply_precise_permission_query(case_plan)
-                case_plan["expected_counts"] = {"branch": 1, "headquarter": 2}
-                case_plan["case_count"] = 7
+            permission_decision = _judge_permission_filter(cp, plans, skipped, self.permission_advisor)
+            cp["permission_decision"] = permission_decision
+            if permission_decision.get("has_branch_permission_filter") and _has_permission_rows_for_filtered_tables(cp, plans):
+                _apply_precise_permission_query(cp)
+                cp["expected_counts"] = {"branch": 1, "headquarter": 2}
+                cp["case_count"] = 7
             else:
                 plans = _collapse_permission_rows(plans)
-                case_plan["insert_plans"] = [plan.to_dict() for plan in plans]
-                case_plan.pop("case_count", None)
-                case_plan["expected_counts"] = {}
+                cp["insert_plans"] = [plan.to_dict() for plan in plans]
+                cp.pop("case_count", None)
+                cp["expected_counts"] = {}
             base_plans = [plan for plan in plans if plan.role == "base"]
             preset_plans = [plan for plan in plans if plan.role != "base"]
             if local_sql_paths.get("base_sql"):
@@ -558,7 +560,7 @@ class SkillStepHandlers:
             if local_sql_paths.get("preset_sql"):
                 _write_text(Path(local_sql_paths["preset_sql"]), render_sql(preset_plans, include_db_prefix=False))
             validation = _validate_sql_files_with_repair(
-                case_plan,
+                cp,
                 case_plan_path.parent,
                 Path(state.config_path) if state.config_path else None,
                 self.runner,
@@ -566,29 +568,29 @@ class SkillStepHandlers:
             )
             if validation.get("status") != "failed":
                 precheck = _validate_sql_return_precheck(
-                    case_plan,
+                    cp,
                     case_plan_path,
                     Path(state.config_path) if state.config_path else None,
                     self.runner,
                 )
                 if precheck.get("status") == "failed":
-                    _write_json(case_plan_path, case_plan)
+                    _write_json(case_plan_path, cp)
                     raise MenuFailure(precheck.get("failure_reason") or "SQL return precheck failed")
-            _write_json(case_plan_path, case_plan)
+            _write_json(case_plan_path, cp)
             if validation.get("status") == "failed":
                 raise MenuFailure(validation.get("failure_reason") or "SQL dry-run validation failed")
-            return state.merge(sql_paths=local_sql_paths).mark_completed("2c")
+            return state.update_case_plan(cp).merge(sql_paths=local_sql_paths).mark_completed("2c")
         except Exception as exc:
             raise MenuFailure(str(exc)) from exc
 
     def plan_verify(self, state: HUITestState) -> HUITestState:
         try:
             case_plan_path = Path(_require_path(state.case_plan_path, "case_plan_path"))
-            case_plan = _load_json(case_plan_path)
-            missing = _missing_required_plan_sections(case_plan)
+            cp = state.edit_case_plan()
+            missing = _missing_required_plan_sections(cp)
             if missing:
                 raise MenuFailure("case_plan missing required sections: " + ", ".join(missing))
-            case_plan["plan_verification"] = {
+            cp["plan_verification"] = {
                 "status": "passed",
                 "checked_at": _utc_now(),
                 "required_sections": [
@@ -599,8 +601,8 @@ class SkillStepHandlers:
                     "sql_paths",
                 ],
             }
-            _write_json(case_plan_path, case_plan)
-            return state.mark_completed("2d")
+            _write_json(case_plan_path, cp)
+            return state.update_case_plan(cp).mark_completed("2d")
         except MenuFailure:
             raise
         except Exception as exc:
@@ -610,21 +612,21 @@ class SkillStepHandlers:
         try:
             case_plan_path = Path(_require_path(state.case_plan_path, "case_plan_path"))
             case_dir = Path(_require_path(state.case_dir, "case_dir"))
-            case_plan = _load_json(case_plan_path)
-            _merge_config_env_into_case_plan(case_plan, Path(state.config_path) if state.config_path else None)
-            reconciliation = _reconcile_case_inputs_with_preset_data(case_plan, case_plan_path.parent)
+            cp = state.edit_case_plan()
+            _merge_config_env_into_case_plan(cp, Path(state.config_path) if state.config_path else None)
+            reconciliation = _reconcile_case_inputs_with_preset_data(cp, case_plan_path.parent)
             if reconciliation.get("changes"):
-                case_plan["case_input_reconciliation"] = reconciliation
-            menu = case_plan.get("menu", {})
+                cp["case_input_reconciliation"] = reconciliation
+            menu = cp.get("menu", {})
             test_root = Path(
-                case_plan.get("paths", {}).get("test_case_dir")
+                cp.get("paths", {}).get("test_case_dir")
                 or case_dir / "generated_tests"
             )
-            case_order = _case_generation_order(case_plan)
+            case_order = _case_generation_order(cp)
             _remove_stale_generated_cases(test_root, menu)
             generated: list[str] = []
             for case_type in case_order:
-                if case_type not in case_plan.get("case_inputs", {}):
+                if case_type not in cp.get("case_inputs", {}):
                     continue
                 output_dir = (
                     test_root
@@ -636,7 +638,7 @@ class SkillStepHandlers:
                 _write_text(
                     test_path,
                     render_pytest_case(
-                        case_plan,
+                        cp,
                         case_type,
                         output_path=test_path,
                         case_plan_dir=case_plan_path.parent,
@@ -647,21 +649,21 @@ class SkillStepHandlers:
                 raise MenuFailure("no case_inputs available for pytest generation")
             template_review = _review_generated_cases(
                 self.template_reviewer,
-                case_plan,
+                cp,
                 generated,
                 case_plan_path.parent,
             )
             if template_review:
-                case_plan["template_review"] = template_review
-                _write_json(case_plan_path, case_plan)
+                cp["template_review"] = template_review
+                _write_json(case_plan_path, cp)
                 if template_review.get("block_generation"):
                     raise MenuFailure(f"template review blocked generation: {template_review.get('summary', '')}")
-            _deploy_common_helpers(self.runner, case_plan)
+            _deploy_common_helpers(self.runner, cp)
             for key in ("verification", "verification_attempts", "repair_attempts"):
-                case_plan.pop(key, None)
-            case_plan["generated_tests"] = generated
-            _write_json(case_plan_path, case_plan)
-            return state.mark_completed("3")
+                cp.pop(key, None)
+            cp["generated_tests"] = generated
+            _write_json(case_plan_path, cp)
+            return state.update_case_plan(cp).mark_completed("3")
         except MenuFailure:
             raise
         except Exception as exc:
@@ -670,15 +672,15 @@ class SkillStepHandlers:
     def verify(self, state: HUITestState) -> HUITestState:
         try:
             case_plan_path = Path(_require_path(state.case_plan_path, "case_plan_path"))
-            case_plan = _load_json(case_plan_path)
-            _merge_config_env_into_case_plan(case_plan, Path(state.config_path) if state.config_path else None)
-            generated_tests = case_plan.get("generated_tests", [])
+            cp = state.edit_case_plan()
+            _merge_config_env_into_case_plan(cp, Path(state.config_path) if state.config_path else None)
+            generated_tests = cp.get("generated_tests", [])
             if not generated_tests:
                 raise MenuFailure("generated_tests is empty; run case generation first")
             pytest_paths = [_resolve_artifact_path(path, case_plan_path.parent) for path in generated_tests]
-            max_attempts = int(case_plan.get("repair_policy", {}).get("max_attempts", 3) or 3)
-            env_name = str(case_plan.get("env_key") or "").strip()
-            pytest_cwd = str(case_plan.get("paths", {}).get("project_dir") or "").strip() or None
+            max_attempts = int(cp.get("repair_policy", {}).get("max_attempts", 3) or 3)
+            env_name = str(cp.get("env_key") or "").strip()
+            pytest_cwd = str(cp.get("paths", {}).get("project_dir") or "").strip() or None
 
             def run_phase(phase: str, attempt_no: int, targets: list[str]) -> subprocess.CompletedProcess[str]:
                 self.runner.emit(
@@ -701,8 +703,8 @@ class SkillStepHandlers:
                 pytest_event["phase"] = phase
                 pytest_event["tests"] = targets
                 self.runner.emit({"event": "pytest_finished", **pytest_event})
-                case_plan.setdefault("verification_attempts", []).append(pytest_event)
-                case_plan["verification"] = {
+                cp.setdefault("verification_attempts", []).append(pytest_event)
+                cp["verification"] = {
                     "status": "passed" if completed_result.returncode == 0 else "failed",
                     "phase": phase,
                     "returncode": completed_result.returncode,
@@ -716,21 +718,21 @@ class SkillStepHandlers:
 
             completed = run_phase("full", 1, pytest_paths)
             if completed.returncode == 0:
-                _write_json(case_plan_path, case_plan)
-                return state.mark_completed("4")
-            if _skip_missing_preview_if_only_failure(case_plan, case_plan_path.parent, completed, self.runner):
-                _write_json(case_plan_path, case_plan)
-                return state.mark_completed("4")
-            if _can_accept_environment_flake(case_plan, pytest_paths, completed):
-                _mark_environment_flake_passed(case_plan, pytest_paths)
-                _write_json(case_plan_path, case_plan)
-                return state.mark_completed("4")
+                _write_json(case_plan_path, cp)
+                return state.update_case_plan(cp).mark_completed("4")
+            if _skip_missing_preview_if_only_failure(cp, case_plan_path.parent, completed, self.runner):
+                _write_json(case_plan_path, cp)
+                return state.update_case_plan(cp).mark_completed("4")
+            if _can_accept_environment_flake(cp, pytest_paths, completed):
+                _mark_environment_flake_passed(cp, pytest_paths)
+                _write_json(case_plan_path, cp)
+                return state.update_case_plan(cp).mark_completed("4")
 
             for attempt_no in range(1, max_attempts + 1):
                 trigger_completed = completed
-                snapshot = _snapshot_repair_targets(case_plan, case_plan_path.parent, include_generated_tests=True)
+                snapshot = _snapshot_repair_targets(cp, case_plan_path.parent, include_generated_tests=True)
                 repair = _repair_failed_verification(
-                    case_plan,
+                    cp,
                     case_plan_path.parent,
                     attempt_no,
                     trigger_completed,
@@ -739,7 +741,7 @@ class SkillStepHandlers:
                     runner=self.runner,
                     event_logger=self.runner.emit,
                 )
-                case_plan.setdefault("repair_attempts", []).append(repair)
+                cp.setdefault("repair_attempts", []).append(repair)
                 self.runner.emit(
                     {
                         "event": "repair_attempt_recorded",
@@ -749,55 +751,55 @@ class SkillStepHandlers:
                         "has_llm_decision": bool(repair.get("llm_decision")),
                     }
                 )
-                _write_json(case_plan_path, case_plan)
+                _write_json(case_plan_path, cp)
                 target_paths = _pytest_failed_nodeids(completed, fallback=pytest_paths)
                 target_completed = run_phase("target", attempt_no, target_paths)
                 repair["verification"] = _pytest_repair_validation_summary("target", target_completed)
                 if target_completed.returncode != 0:
-                    if _skip_missing_preview_if_only_failure(case_plan, case_plan_path.parent, target_completed, self.runner):
-                        _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="target pytest accepted by preview skip policy")
-                        _write_json(case_plan_path, case_plan)
-                        return state.mark_completed("4")
-                    if _can_accept_environment_flake(case_plan, pytest_paths, target_completed):
-                        _mark_environment_flake_passed(case_plan, pytest_paths)
-                        _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="target pytest accepted as environment flake")
-                        _write_json(case_plan_path, case_plan)
-                        return state.mark_completed("4")
-                    _record_repair_restore(repair, snapshot, case_plan, status="restored", reason="target pytest failed")
-                    _restore_repair_snapshot(snapshot, case_plan)
+                    if _skip_missing_preview_if_only_failure(cp, case_plan_path.parent, target_completed, self.runner):
+                        _record_repair_restore(repair, snapshot, cp, status="kept", reason="target pytest accepted by preview skip policy")
+                        _write_json(case_plan_path, cp)
+                        return state.update_case_plan(cp).mark_completed("4")
+                    if _can_accept_environment_flake(cp, pytest_paths, target_completed):
+                        _mark_environment_flake_passed(cp, pytest_paths)
+                        _record_repair_restore(repair, snapshot, cp, status="kept", reason="target pytest accepted as environment flake")
+                        _write_json(case_plan_path, cp)
+                        return state.update_case_plan(cp).mark_completed("4")
+                    _record_repair_restore(repair, snapshot, cp, status="restored", reason="target pytest failed")
+                    _restore_repair_snapshot(snapshot, cp)
                     completed = trigger_completed
-                    _write_json(case_plan_path, case_plan)
+                    _write_json(case_plan_path, cp)
                     if attempt_no >= max_attempts:
                         break
                     continue
                 if _same_pytest_targets(target_paths, pytest_paths):
-                    _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="target pytest passed")
-                    _write_json(case_plan_path, case_plan)
-                    return state.mark_completed("4")
+                    _record_repair_restore(repair, snapshot, cp, status="kept", reason="target pytest passed")
+                    _write_json(case_plan_path, cp)
+                    return state.update_case_plan(cp).mark_completed("4")
                 regression_completed = run_phase("regression", attempt_no, pytest_paths)
                 repair["verification"] = _pytest_repair_validation_summary("regression", regression_completed)
                 if regression_completed.returncode == 0:
-                    _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="regression pytest passed")
-                    _write_json(case_plan_path, case_plan)
-                    return state.mark_completed("4")
-                if _skip_missing_preview_if_only_failure(case_plan, case_plan_path.parent, regression_completed, self.runner):
-                    _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="regression pytest accepted by preview skip policy")
-                    _write_json(case_plan_path, case_plan)
-                    return state.mark_completed("4")
-                if _can_accept_environment_flake(case_plan, pytest_paths, regression_completed):
-                    _mark_environment_flake_passed(case_plan, pytest_paths)
-                    _record_repair_restore(repair, snapshot, case_plan, status="kept", reason="regression pytest accepted as environment flake")
-                    _write_json(case_plan_path, case_plan)
-                    return state.mark_completed("4")
-                _record_repair_restore(repair, snapshot, case_plan, status="restored", reason="regression pytest failed")
-                _restore_repair_snapshot(snapshot, case_plan)
+                    _record_repair_restore(repair, snapshot, cp, status="kept", reason="regression pytest passed")
+                    _write_json(case_plan_path, cp)
+                    return state.update_case_plan(cp).mark_completed("4")
+                if _skip_missing_preview_if_only_failure(cp, case_plan_path.parent, regression_completed, self.runner):
+                    _record_repair_restore(repair, snapshot, cp, status="kept", reason="regression pytest accepted by preview skip policy")
+                    _write_json(case_plan_path, cp)
+                    return state.update_case_plan(cp).mark_completed("4")
+                if _can_accept_environment_flake(cp, pytest_paths, regression_completed):
+                    _mark_environment_flake_passed(cp, pytest_paths)
+                    _record_repair_restore(repair, snapshot, cp, status="kept", reason="regression pytest accepted as environment flake")
+                    _write_json(case_plan_path, cp)
+                    return state.update_case_plan(cp).mark_completed("4")
+                _record_repair_restore(repair, snapshot, cp, status="restored", reason="regression pytest failed")
+                _restore_repair_snapshot(snapshot, cp)
                 completed = trigger_completed
-                _write_json(case_plan_path, case_plan)
+                _write_json(case_plan_path, cp)
                 if attempt_no >= max_attempts:
                     break
-            case_plan.setdefault("verification", {})["failure_reason"] = "pytest verification failed after repair attempts"
-            _write_json(case_plan_path, case_plan)
-            return state.mark_completed("4")
+            cp.setdefault("verification", {})["failure_reason"] = "pytest verification failed after repair attempts"
+            _write_json(case_plan_path, cp)
+            return state.update_case_plan(cp).mark_completed("4")
         except MenuFailure:
             raise
         except Exception as exc:
@@ -807,20 +809,21 @@ class SkillStepHandlers:
         try:
             case_dir = Path(_require_path(state.case_dir, "case_dir"))
             case_plan_path = Path(_require_path(state.case_plan_path, "case_plan_path"))
-            case_plan = _load_json(case_plan_path)
+            cp = state.edit_case_plan()
             report_path = case_dir / "reports" / "summary.md"
-            _write_text(report_path, _render_summary(case_plan))
+            _write_text(report_path, _render_summary(cp))
             reports = [*state.reports, str(report_path)]
-            case_plan["reports"] = {"summary": _artifact_path(report_path, case_dir)}
-            _write_json(case_plan_path, case_plan)
-            if case_plan.get("verification", {}).get("status") == "failed":
-                failure_reason = case_plan.get("verification", {}).get("failure_reason") or "pytest verification failed"
+            cp["reports"] = {"summary": _artifact_path(report_path, case_dir)}
+            _write_json(case_plan_path, cp)
+            if cp.get("verification", {}).get("status") == "failed":
+                failure_reason = cp.get("verification", {}).get("failure_reason") or "pytest verification failed"
                 return (
-                    state.merge(reports=reports)
+                    state.update_case_plan(cp)
+                    .merge(reports=reports)
                     .mark_completed("5")
                     .record_failure("5", failure_reason, scope="menu")
                 )
-            return state.merge(reports=reports).mark_completed("5")
+            return state.update_case_plan(cp).merge(reports=reports).mark_completed("5")
         except Exception as exc:
             raise MenuFailure(str(exc)) from exc
 
@@ -1006,14 +1009,14 @@ def _normalize_portable_paths(payload: dict, base_dir: Path) -> dict:
     return payload
 
 
-def _write_initial_case_plan(config_path: Path, case_plan_path: Path) -> None:
+def _build_initial_case_plan(config_path: Path) -> dict:
     config = _load_json(config_path)
     env = config.get("env", {})
     menu = config.get("menu", {})
     computed = config.get("computed", {})
     menu_url = computed.get("menu_url", "")
     func_code = computed.get("func_code") or _func_code_from_url(menu_url)
-    payload = {
+    return {
         "owner": _menu_owner(menu, env),
         "env_key": env.get("env_key", ""),
         "menu": {
@@ -1046,7 +1049,6 @@ def _write_initial_case_plan(config_path: Path, case_plan_path: Path) -> None:
             "templates": {},
         },
     }
-    _write_json(case_plan_path, payload)
 
 
 def _menu_owner(menu: dict, env: dict) -> str:
@@ -1874,13 +1876,13 @@ def _validate_sql_return_precheck(
         return precheck
     config = _load_json(config_path)
     db = _business_db_key(case_plan)
-    args = ["--case-plan", str(case_plan_path), "--config", str(config_path), "--db", db, "--json"]
+    args = ["--stdin", "--base-dir", str(case_plan_path.parent), "--config", str(config_path), "--db", db, "--json"]
     env_key = config.get("env", {}).get("env_key")
     if env_key:
         args.extend(["--env", str(env_key)])
     runner.emit({"event": "sql_return_precheck_started", "db": db})
     try:
-        raw = runner.run_json("sql_return_precheck.py", args, timeout=120)
+        raw = runner.run_json_stdin("sql_return_precheck.py", args, case_plan, timeout=120)
     except ScriptError as exc:
         raw = _parse_script_error_json(exc)
     status = "passed" if raw.get("ok") else "failed"

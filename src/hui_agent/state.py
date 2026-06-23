@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal
+from typing import TypedDict
 from uuid import uuid4
+import copy
 
 from hui_agent.failure_policy import FailureScope, scope_for_exception
 
@@ -31,6 +33,61 @@ def next_step(completed_steps: list[str]) -> str:
     return "DONE"
 
 
+class CasePlanSchema(TypedDict, total=False):
+    """Type hints for case_plan dict keys. total=False because each step
+    only produces a subset of keys."""
+    # Step 0a
+    owner: str
+    env_key: str
+    menu: dict[str, Any]
+    gate_decisions: dict[str, Any]
+    case_order: list[str]
+    form_fields: dict[str, Any]
+    field_groups: list[dict[str, Any]]
+    presets: dict[str, Any]
+    preset_fields: dict[str, Any]
+    filter_selections: dict[str, Any]
+    preset_strategy: dict[str, Any]
+    shard: dict[str, Any]
+    expected_counts: dict[str, Any]
+    paths: dict[str, Any]
+    # Step 1a / 1b
+    case_inputs: dict[str, Any]
+    sql_probe: dict[str, Any]
+    # Step 2a
+    log_analysis: dict[str, Any]
+    # Step 2b
+    sql_decision: dict[str, Any]
+    # Step 2c
+    sql_paths: dict[str, Any]
+    sql_requirements: list[dict[str, Any]]
+    insert_plans: list[dict[str, Any]]
+    insert_plan_skipped: list[dict[str, Any]]
+    sql_coverage: dict[str, Any]
+    permission_decision: dict[str, Any]
+    permission_query: dict[str, Any]
+    sql_validation: dict[str, Any]
+    sql_validation_attempts: list[dict[str, Any]]
+    sql_repair_attempts: list[dict[str, Any]]
+    sql_diagnostics: dict[str, Any]
+    sql_return_precheck: dict[str, Any]
+    schema_refresh: dict[str, Any]
+    case_count: int
+    # Step 2d
+    plan_verification: dict[str, Any]
+    # Step 3
+    generated_tests: list[str]
+    template_review: dict[str, Any]
+    case_input_reconciliation: dict[str, Any]
+    # Step 4
+    verification: dict[str, Any]
+    verification_attempts: list[dict[str, Any]]
+    repair_attempts: list[dict[str, Any]]
+    preview_verification: dict[str, Any]
+    # Step 5
+    reports: dict[str, Any]
+
+
 @dataclass(frozen=True)
 class HUITestState:
     thread_id: str
@@ -42,6 +99,7 @@ class HUITestState:
     config_path: str = ""
     case_plan_path: str = ""
     case_dir: str = ""
+    case_plan: dict[str, Any] = field(default_factory=dict)
     sql_paths: dict[str, Any] = field(default_factory=dict)
     gate_decisions: dict[str, Any] = field(default_factory=dict)
     form_fields_summary: dict[str, Any] = field(default_factory=dict)
@@ -66,7 +124,21 @@ class HUITestState:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "HUITestState":
         allowed = set(cls.__dataclass_fields__)
-        return cls(**{key: value for key, value in payload.items() if key in allowed})
+        filtered = {key: value for key, value in payload.items() if key in allowed}
+        state = cls(**filtered)
+        # Resume compatibility: if case_plan is empty but a case_plan.json
+        # exists on disk (e.g. from a pre-refactoring checkpoint), load it
+        # so handlers don't start from an empty dict.
+        if not state.case_plan and state.case_plan_path:
+            import json as _json
+
+            path = __import__("pathlib").Path(state.case_plan_path)
+            if path.exists():
+                state = replace(
+                    state,
+                    case_plan=_json.loads(path.read_text(encoding="utf-8")),
+                )
+        return state
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -102,6 +174,27 @@ class HUITestState:
 
     def merge(self, **updates: Any) -> "HUITestState":
         return replace(self, **updates, updated_at=datetime.now().isoformat())
+
+    def update_case_plan(self, updates: dict[str, Any]) -> "HUITestState":
+        """Merge *updates* into case_plan and return a new state.
+
+        Shallow-merge at the top level: keys in *updates* replace same-named
+        keys in the existing case_plan dict; other keys are preserved.
+        """
+        merged = {**self.case_plan, **updates}
+        return replace(
+            self,
+            case_plan=merged,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    def edit_case_plan(self) -> dict[str, Any]:
+        """Return a deep copy of case_plan for safe in-place editing.
+
+        Handlers should use this instead of ``state.case_plan`` to avoid
+        mutating the original dict inside the frozen dataclass.
+        """
+        return copy.deepcopy(self.case_plan)
 
     def retry_from(self, step: str) -> "HUITestState":
         if step not in STEP_ORDER:

@@ -130,6 +130,86 @@ class ScriptRunner:
         text = self.run_text(script_name, args, cwd=cwd, timeout=timeout)
         return _parse_last_json_value(text)
 
+    def run_json_stdin(
+        self,
+        script_name: str,
+        args: Sequence[str] = (),
+        payload: dict[str, Any] | None = None,
+        *,
+        cwd: str | Path | None = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a script with *payload* passed as JSON via stdin.
+
+        Returns the parsed JSON object from stdout.  Use this instead of
+        writing a temporary file when the subprocess only needs read-only
+        access to the data.
+        """
+        command = self.build_command(script_name, args)
+        arg_list = [str(arg) for arg in args]
+        safe_args = _redact_args(arg_list)
+        safe_command = [*command[:2], *safe_args]
+        stdin_text = json.dumps(payload or {}, ensure_ascii=False)
+        self._emit(
+            {
+                "event": "script_started",
+                "script": script_name,
+                "args": safe_args,
+                "command": safe_command,
+                "stdin_bytes": len(stdin_text.encode("utf-8")),
+            }
+        )
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["MSYS_NO_PATHCONV"] = "1"
+        env["NO_PROXY"] = _merge_no_proxy(env.get("NO_PROXY") or env.get("no_proxy", ""))
+        env["no_proxy"] = env["NO_PROXY"]
+        try:
+            result = self._run(
+                command,
+                cwd=str(cwd or self.skill_root),
+                env=env,
+                text=True,
+                capture_output=True,
+                encoding="utf-8",
+                timeout=timeout,
+                input=stdin_text,
+            )
+        except Exception as exc:
+            self._emit(
+                {
+                    "event": "script_failed",
+                    "script": script_name,
+                    "args": safe_args,
+                    "error": str(exc),
+                }
+            )
+            raise
+        if result.returncode != 0:
+            self._emit(
+                {
+                    "event": "script_failed",
+                    "script": script_name,
+                    "args": safe_args,
+                    "returncode": result.returncode,
+                    "stderr": (result.stderr or result.stdout or "")[:1000],
+                }
+            )
+            raise ScriptError(command, result.returncode, result.stdout, result.stderr)
+        value = _parse_last_json_value(result.stdout)
+        if not isinstance(value, dict):
+            raise ValueError(f"Expected JSON object from stdin script, got {type(value).__name__}")
+        self._emit(
+            {
+                "event": "script_finished",
+                "script": script_name,
+                "args": safe_args,
+                "returncode": result.returncode,
+                "stdout_preview": (result.stdout or "")[:1000],
+            }
+        )
+        return value
+
     def emit(self, payload: dict[str, Any]) -> None:
         self._emit(payload)
 

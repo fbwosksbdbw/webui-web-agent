@@ -79,7 +79,7 @@ def test_return_precheck_reports_branch_and_headquarter_counts(tmp_path, monkeyp
         encoding="utf-8",
     )
 
-    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_fund")
+    result = module.run_precheck(case_plan=case_plan_path, config_path=config_path, db_key="ui_fund")
 
     assert result["status"] == "passed"
     assert result["permission_checks"]["branch"]["actual"] == 1
@@ -258,7 +258,7 @@ def test_return_precheck_attaches_diagnostics_when_query_returns_zero(tmp_path, 
         encoding="utf-8",
     )
 
-    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_fund")
+    result = module.run_precheck(case_plan=case_plan_path, config_path=config_path, db_key="ui_fund")
 
     assert result["status"] == "failed"
     diagnostics = result["checks"][0]["diagnostics"]
@@ -322,7 +322,7 @@ def test_return_precheck_supports_additional_permission_columns(tmp_path, monkey
         encoding="utf-8",
     )
 
-    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_fund")
+    result = module.run_precheck(case_plan=case_plan_path, config_path=config_path, db_key="ui_fund")
 
     assert result["status"] == "passed"
     hq_sql = result["permission_checks"]["headquarter"]["sql"]
@@ -365,7 +365,7 @@ def test_return_precheck_derives_permission_counts_from_projected_branch_aliases
         encoding="utf-8",
     )
 
-    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_fund")
+    result = module.run_precheck(case_plan=case_plan_path, config_path=config_path, db_key="ui_fund")
 
     assert result["status"] == "passed"
     assert result["permission_checks"]["branch"]["status"] == "passed"
@@ -410,7 +410,7 @@ def test_return_precheck_substitutes_current_params_before_counting(tmp_path, mo
         encoding="utf-8",
     )
 
-    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_fund")
+    result = module.run_precheck(case_plan=case_plan_path, config_path=config_path, db_key="ui_fund")
 
     assert result["status"] == "passed"
     assert result["checks"][0]["status"] == "passed"
@@ -465,7 +465,7 @@ def test_return_precheck_executes_base_sql_on_ui_bc_and_business_sql_on_target_d
         encoding="utf-8",
     )
 
-    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_fund2")
+    result = module.run_precheck(case_plan=case_plan_path, config_path=config_path, db_key="ui_fund2")
 
     assert result["status"] == "passed"
     assert load_calls[:1] == ["ui_fund2"]
@@ -635,7 +635,7 @@ def test_permission_precheck_uses_base_cursor_for_base_only_permission_sql(tmp_p
         encoding="utf-8",
     )
 
-    result = module.run_precheck(case_plan_path=case_plan_path, config_path=config_path, db_key="ui_trust2")
+    result = module.run_precheck(case_plan=case_plan_path, config_path=config_path, db_key="ui_trust2")
 
     assert result["permission_checks"]["branch"]["status"] == "passed"
     assert "ui_bc" not in connections

@@ -7,6 +7,9 @@ from typing import Any
 
 import yaml
 
+DEFAULT_RUNS_ROOT = "./_local/runs"
+DEFAULT_CHECKPOINT_DB = "./_local/runs/checkpoints.sqlite"
+
 
 @dataclass(frozen=True)
 class AgentSettings:
@@ -26,10 +29,10 @@ class AgentSettings:
         base = Path(path).resolve().parent
         return cls(
             skill_root=_resolve_path(base, os.getenv("HUI_SKILL_ROOT") or runtime.get("skill_root", "./knowledge")),
-            runs_root=_resolve_path(base, os.getenv("HUI_RUNS_ROOT") or runtime.get("runs_root", "./runs")),
+            runs_root=_resolve_path(base, os.getenv("HUI_RUNS_ROOT") or runtime.get("runs_root", DEFAULT_RUNS_ROOT)),
             checkpoint_db=_resolve_path(
                 base,
-                os.getenv("HUI_CHECKPOINT_DB") or runtime.get("checkpoint_db", "./runs/checkpoints.sqlite"),
+                os.getenv("HUI_CHECKPOINT_DB") or runtime.get("checkpoint_db", DEFAULT_CHECKPOINT_DB),
             ),
             serial_browser=bool(runtime.get("serial_browser", True)),
             default_model=os.getenv("HUI_AGENT_MODEL") or models.get("default", "gpt-4.1"),

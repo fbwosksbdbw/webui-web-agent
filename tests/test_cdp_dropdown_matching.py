@@ -10,30 +10,25 @@ def _load_cdp_executor(path: Path):
     return module
 
 
-def _cdp_paths():
-    root = Path(__file__).resolve().parents[2]
-    return [
-        root / "scripts" / "cdp_executor.py",
-        root / "hui-playwright-agent" / "knowledge" / "scripts" / "cdp_executor.py",
-    ]
+def _cdp_path() -> Path:
+    root = Path(__file__).resolve().parents[1]
+    return root / "knowledge" / "scripts" / "cdp_executor.py"
 
 
 def test_dropdown_matcher_rejects_pagination_text_and_requires_exact_code_or_label():
-    for path in _cdp_paths():
-        module = _load_cdp_executor(path)
+    module = _load_cdp_executor(_cdp_path())
 
-        assert module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "UI_HT_P001:UI自动化HT信托产品")
-        assert module._dropdown_option_matches("UI_HT_P001", "UI_HT_P001:UI自动化HT信托产品")
-        assert module._dropdown_option_matches("UI自动化HT信托产品", "UI_HT_P001:UI自动化HT信托产品")
-        assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "10 条/页")
-        assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "共 12 条 10 条/页")
-        assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "UI_HT_P001 搜索")
+    assert module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "UI_HT_P001:UI自动化HT信托产品")
+    assert module._dropdown_option_matches("UI_HT_P001", "UI_HT_P001:UI自动化HT信托产品")
+    assert module._dropdown_option_matches("UI自动化HT信托产品", "UI_HT_P001:UI自动化HT信托产品")
+    assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "10 条/页")
+    assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "共 12 条 10 条/页")
+    assert not module._dropdown_option_matches("UI_HT_P001:UI自动化HT信托产品", "UI_HT_P001 搜索")
 
 
 def test_select_single_should_not_fallback_when_specific_option_requested():
-    for path in _cdp_paths():
-        module = _load_cdp_executor(path)
+    module = _load_cdp_executor(_cdp_path())
 
-        assert module._allow_first_option_fallback("__FIRST_OPTION__")
-        assert module._allow_first_option_fallback("_")
-        assert not module._allow_first_option_fallback("UI_HT_P001:UI自动化HT信托产品")
+    assert module._allow_first_option_fallback("__FIRST_OPTION__")
+    assert module._allow_first_option_fallback("_")
+    assert not module._allow_first_option_fallback("UI_HT_P001:UI自动化HT信托产品")

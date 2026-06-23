@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from hui_agent.cli import (
     _format_runtime_event_detail,
     _record_pytest_log_line,
@@ -25,6 +27,8 @@ def test_cli_accepts_required_public_commands():
     skill_root = Path(parser.parse_args(["menus"]).skill_root)
     assert skill_root.name == "knowledge"
     assert (skill_root / "scripts" / "config_reader.py").exists()
+    assert parser.parse_args(["menus"]).runs_root == "_local/runs"
+    assert parser.parse_args(["menus"]).checkpoint_db == "_local/runs/checkpoints.sqlite"
     assert parser.parse_args(["--runs-root", "runs", "menus"]).runs_root == "runs"
     assert parser.parse_args(["run", "--menu", "基金分红查询"]).menu == "基金分红查询"
     assert parser.parse_args(["batch"]).command == "batch"
@@ -52,6 +56,11 @@ def test_cli_schema_refresh_dbs_keeps_common_db_explicit():
         "ui_trust2",
         "ui_bc",
     ]
+
+
+def test_cli_schema_refresh_dbs_rejects_unknown_module():
+    with pytest.raises(ValueError, match="Unknown schema module: unknown"):
+        _schema_refresh_dbs(["unknown"], [])
 
 
 def test_cli_formats_verification_and_llm_events_for_live_logs():

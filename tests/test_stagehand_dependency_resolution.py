@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 def _load_wrapper(path: Path):
     spec = importlib.util.spec_from_file_location("stagehand_explore_wrapper_for_test", path)
@@ -11,10 +13,19 @@ def _load_wrapper(path: Path):
 
 
 def test_knowledge_stagehand_wrapper_uses_agent_local_node_modules():
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[1]
+    node_modules = (
+        repo_root
+        / "knowledge"
+        / "scripts"
+        / "stagehand_explorer"
+        / "node_modules"
+    )
+    if not (node_modules / "ts-node").is_dir():
+        pytest.skip("node_modules not installed; run 'npm ci' in knowledge/scripts/stagehand_explorer/")
+
     wrapper = _load_wrapper(
         repo_root
-        / "hui-playwright-agent"
         / "knowledge"
         / "scripts"
         / "stagehand_explorer"
@@ -22,25 +33,26 @@ def test_knowledge_stagehand_wrapper_uses_agent_local_node_modules():
         / "explore_wrapper.py"
     )
 
-    node_modules = wrapper._find_stagehand_node_modules(wrapper._EXPLORER_DIR)
+    result = wrapper._find_stagehand_node_modules(wrapper._EXPLORER_DIR)
 
-    assert (
-        node_modules
-        == repo_root
-        / "hui-playwright-agent"
+    assert result == node_modules
+
+
+def test_stagehand_command_requires_agent_local_ts_node_register():
+    repo_root = Path(__file__).resolve().parents[1]
+    ts_node_dir = (
+        repo_root
         / "knowledge"
         / "scripts"
         / "stagehand_explorer"
         / "node_modules"
+        / "ts-node"
     )
-    assert (node_modules / "ts-node").is_dir()
+    if not ts_node_dir.is_dir():
+        pytest.skip("node_modules not installed; run 'npm ci' in knowledge/scripts/stagehand_explorer/")
 
-
-def test_stagehand_command_requires_agent_local_ts_node_register():
-    repo_root = Path(__file__).resolve().parents[2]
     wrapper = _load_wrapper(
         repo_root
-        / "hui-playwright-agent"
         / "knowledge"
         / "scripts"
         / "stagehand_explorer"
@@ -60,15 +72,5 @@ def test_stagehand_command_requires_agent_local_ts_node_register():
     )
 
     require_index = command.index("--require") + 1
-    assert (
-        Path(command[require_index])
-        == repo_root
-        / "hui-playwright-agent"
-        / "knowledge"
-        / "scripts"
-        / "stagehand_explorer"
-        / "node_modules"
-        / "ts-node"
-        / "register"
-        / "index.js"
-    )
+    ts_register = ts_node_dir / "register" / "index.js"
+    assert Path(command[require_index]) == ts_register

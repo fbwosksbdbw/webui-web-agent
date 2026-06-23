@@ -29,11 +29,13 @@ def _write_script(path: Path, body: str) -> None:
 
 
 def _state(case_dir: Path) -> HUITestState:
+    cp_path = case_dir / "case_plan.json"
+    cp = json.loads(cp_path.read_text(encoding="utf-8")) if cp_path.exists() else {}
     return HUITestState.new("菜单A").with_paths(
         config_path=str(case_dir / "config.json"),
-        case_plan_path=str(case_dir / "case_plan.json"),
+        case_plan_path=str(cp_path),
         case_dir=str(case_dir),
-    )
+    ).merge(case_plan=cp)
 
 
 def _write_schema_cache(skill: Path, payload: dict, db_family: str = "ui_bc") -> None:

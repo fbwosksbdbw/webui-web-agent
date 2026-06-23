@@ -214,7 +214,7 @@
 │                  │ │  · sql           │ │  pytest_*.log    │
 │  通过 subprocess │ │  · template      │ │                  │
 │  执行子进程      │ │                  │ │  存储在           │
-│                  │ │  通过 OpenAI     │ │  runs/<thread_id>/│
+│                  │ │  通过 OpenAI     │ │  _local/runs/<thread_id>/│
 │                  │ │  兼容协议调用    │ │  目录下           │
 └──────────────────┘ └──────────────────┘ └──────────────────┘
 ```
@@ -1034,7 +1034,7 @@ class ConfigFailure(WorkflowFailure):
 
 **存储结构**：
 ```
-runs/<thread_id>/
+_local/runs/<thread_id>/
 ├── events.jsonl          # 结构化事件流（每行一个 JSON）
 │   格式: {"timestamp": "...", "thread_id": "...", "step": "2c", "event": "sql_dry_run_started", "payload": {...}}
 │
@@ -1388,7 +1388,7 @@ python -m hui_agent.cli resume --thread-id hui-5c748bb773f1
 ### 11.1 日志文件位置
 
 ```
-<agent_root>/runs/<thread_id>/
+<agent_root>/_local/runs/<thread_id>/
 ├── events.jsonl          # 结构化事件（机器可读）
 ├── agent.log             # 文本日志（人类可读）
 ├── result.json           # 最终状态
